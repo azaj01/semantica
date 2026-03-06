@@ -897,7 +897,7 @@ def extract_entities_llm(
         "entity_types": kwargs.get("entity_types"),
     }
     cached_result = _result_cache.get("entities", text, **cache_params)
-    if cached_result:
+    if cached_result is not None:
         logger.debug(f"Cache hit for entity extraction ({len(cached_result)} entities)")
         return cached_result
     
