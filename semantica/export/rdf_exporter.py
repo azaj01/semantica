@@ -851,6 +851,15 @@ class RDFExporter:
         # Supported RDF formats
         self.supported_formats = ["turtle", "rdfxml", "jsonld", "ntriples", "n3"]
 
+        # Format aliases (common extensions/shorthands → canonical names)
+        self._format_aliases = {
+            "ttl": "turtle",
+            "nt": "ntriples",
+            "xml": "rdfxml",
+            "rdf": "rdfxml",
+            "json-ld": "jsonld",
+        }
+
         # Initialize progress tracker
         self.progress_tracker = get_progress_tracker()
 
@@ -892,6 +901,12 @@ class RDFExporter:
         )
 
         try:
+            if not isinstance(format, str):
+                raise ValidationError(
+                    f"RDF format must be a string, got: {type(format).__name__}"
+                )
+            fmt = format.strip().lower()
+            format = self._format_aliases.get(fmt, fmt)
             if format not in self.supported_formats:
                 raise ValidationError(
                     f"Unsupported RDF format: {format}. "
