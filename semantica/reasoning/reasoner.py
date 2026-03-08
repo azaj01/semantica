@@ -330,6 +330,28 @@ class Reasoner:
         
     def _match_pattern(self, pattern: str, fact: str, initial_bindings: Dict[str, str]) -> Optional[Dict[str, str]]:
         """Match a pattern against a fact with initial bindings."""
+        # Split on ?var placeholders first, then escape only the literal segments.
+        # This avoids re.escape() mangling the surrounding parentheses and ?
+        # before the variable substitution step.
+        segments = re.split(r"(\?\w+)", pattern)
+        seen_vars: set = set()
+        p_regex = ""
+        for seg in segments:
+            if seg.startswith("?"):
+                var_name = seg[1:]
+                if var_name in initial_bindings:
+                    # Already bound — require the exact literal value
+                    p_regex += re.escape(initial_bindings[var_name])
+                elif var_name in seen_vars:
+                    # Same variable used twice — use a backreference
+                    p_regex += f"(?P={var_name})"
+                else:
+                    p_regex += f"(?P<{var_name}>.+?)"
+                    seen_vars.add(var_name)
+            else:
+                p_regex += re.escape(seg)
+        p_regex = f"^{p_regex}$"
+
         # Simple regex-based matcher for patterns like "Person(?x)" and facts like "Person(John)"
         
         p_regex = re.escape(pattern)
@@ -342,11 +364,13 @@ class Reasoner:
                 new_bindings = initial_bindings.copy()
                 for var, value in match.groupdict().items():
                     if var in new_bindings and new_bindings[var] != value:
+                        return None  # Binding conflict
                         return None # Binding conflict
                     new_bindings[var] = value
                 return new_bindings
         except Exception:
             pass
+
             
         return None
         

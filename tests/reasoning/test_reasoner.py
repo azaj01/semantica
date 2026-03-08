@@ -79,5 +79,59 @@ class TestReasoner(unittest.TestCase):
         self.assertEqual(len(self.reasoner.facts), 0)
         self.assertEqual(len(self.reasoner.rules), 0)
 
+    # --- Bug #354: founded_by predicate inference ---
+
+    def test_infer_facts_with_multi_word_values(self):
+        """Bug #354 — _match_pattern must match facts whose values contain spaces."""
+        reasoner = Reasoner()
+        for f in [
+            {"source_name": "Steve Jobs",    "target_name": "Apple", "type": "founded_by"},
+            {"source_name": "Steve Wozniak", "target_name": "Apple", "type": "founded_by"},
+            {"source_name": "Ronald Wayne",  "target_name": "Apple", "type": "founded_by"},
+        ]:
+            reasoner.add_fact(f)
+
+        inferred = reasoner.infer_facts(
+            [],
+            rules=["IF founded_by(?person, ?org) THEN is_founder(?person, ?org)"],
+        )
+
+        self.assertEqual(len(inferred), 3)
+        self.assertIn("is_founder(Steve Jobs, Apple)", inferred)
+        self.assertIn("is_founder(Steve Wozniak, Apple)", inferred)
+        self.assertIn("is_founder(Ronald Wayne, Apple)", inferred)
+
+    def test_match_pattern_pre_bound_variable(self):
+        """_match_pattern must enforce pre-bound variable values."""
+        reasoner = Reasoner()
+        bindings = {"org": "Apple"}
+        result = reasoner._match_pattern(
+            "founded_by(?person, ?org)",
+            "founded_by(Steve Jobs, Apple)",
+            bindings,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["person"], "Steve Jobs")
+        self.assertEqual(result["org"], "Apple")
+
+    def test_match_pattern_binding_conflict_returns_none(self):
+        """_match_pattern must return None when a bound variable doesn't match."""
+        reasoner = Reasoner()
+        bindings = {"org": "Google"}
+        result = reasoner._match_pattern(
+            "founded_by(?person, ?org)",
+            "founded_by(Steve Jobs, Apple)",
+            bindings,
+        )
+        self.assertIsNone(result)
+
+    def test_match_pattern_single_word_values(self):
+        """_match_pattern must still work for single-word values (regression guard)."""
+        reasoner = Reasoner()
+        result = reasoner._match_pattern("Person(?x)", "Person(John)", {})
+        self.assertIsNotNone(result)
+        self.assertEqual(result["x"], "John")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-beta] - 2026-03-07
+
+- **Multi-Founder LLM Extraction & Reasoner Inference Fix** (PR #354 by @KaifAhmad1):
+  - Fixed `_parse_relation_result` in `methods.py` — unmatched subjects/objects now produce a synthetic `UNKNOWN` entity instead of silently dropping the relation; all LLM-returned co-founders are preserved
+  - Rewrote `_match_pattern` in `reasoner.py` — splits pattern on `?var` placeholders first, then escapes only the literal segments; pre-bound variables resolve to exact literals, repeated variables use backreferences, non-greedy `.+?` prevents over-consumption of literal separators
+  - Added `tests/reasoning/test_reasoner.py` with 4 tests covering multi-word value inference, pre-bound variables, binding conflicts, and single-word regression
+  - Added `tests/semantic_extract/test_relation_extractor.py` with 6 tests covering all-founders returned, synthetic entity creation, matched entity integrity, predicate/confidence preservation, empty response, and malformed entries
+- **TTL Export Alias Fix** (PR #355 by @KaifAhmad1):
+  - Added `_format_aliases` map in `RDFExporter` so `format="ttl"`, `"nt"`, `"xml"`, `"rdf"`, and `"json-ld"` resolve to their canonical counterparts without breaking existing callers
+  - Alias resolution applied at the top of `export_to_rdf()` before format validation — zero public API changes
+  - Added working TTL export cell to `cookbook/introduction/15_Export.ipynb` (Step 3: RDF Export)
+  - Added `tests/export/test_rdf_exporter.py` with 8 tests covering all aliases, canonical formats, error handling, and file export
+
 - **Incremental/Delta Processing Feature** (PR #349 by @ZohaibHassan16, reviewed and fixed by @KaifAhmad1):
   - Native delta computation between graph snapshots using SPARQL queries
   - Delta-aware pipeline execution with `delta_mode` configuration for processing only changed data
