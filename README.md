@@ -59,78 +59,22 @@ pip install semantica
 
 ## What's New in v0.3.0
 
-> **First stable release** — promoted to `Production/Stable` on PyPI.
-> Full summary of everything shipped across 0.3.0-alpha → 0.3.0-beta → 0.3.0 stable.
+> First stable release — `Production/Stable` on PyPI. Ships across three stages: 0.3.0-alpha, 0.3.0-beta, and 0.3.0 stable.
 
-### Context Graph — Feature Completeness
+| Area | Highlights |
+|------|-----------|
+| **Context Graphs** | Temporal validity windows (`valid_from`/`valid_until`), weighted BFS (`min_weight`), cross-graph navigation (`link_graph`, `navigate_to`, `resolve_links`) with full save/load persistence |
+| **Decision Intelligence** | Complete lifecycle: `record_decision` → `trace_decision_chain` → `analyze_decision_impact` → `find_similar_decisions`; hybrid precedent search; `PolicyEngine` with versioned rules |
+| **KG Algorithms** | PageRank, betweenness, community detection (Louvain), Node2Vec embeddings, link prediction, path finding — all returning structured dicts |
+| **Semantic Extraction** | LLM relation extraction fixed (no silent drops); `_match_pattern` rewritten; duplicate relation bug removed; `"llm_typed"` metadata corrected |
+| **Deduplication v2** | `blocking_v2`/`hybrid_v2` candidate generation (**63.6% faster**); two-stage prefilter (**18–25% faster**); semantic dedup v2 (**6.98x faster**) |
+| **Delta Processing** | SPARQL-based incremental diff; `delta_mode` pipelines; snapshot versioning with `prune_versions()` |
+| **Export** | RDF format aliases (`"ttl"`, `"json-ld"`, etc.); ArangoDB AQL export; Apache Parquet export (Spark/BigQuery/Databricks ready) |
+| **Pipeline** | `FailureHandler` with LINEAR/EXPONENTIAL/FIXED backoff; `PipelineValidator` returning `ValidationResult`; retry loop fixed |
+| **Graph Backends** | Apache AGE (SQL injection fixed), AWS Neptune, FalkorDB, PgVector (HNSW/IVFFlat indexing) |
+| **Tests** | **886+ passing, 0 failures** — 335 context, ~430 KG, 70 semantic extraction, 85 real-world E2E |
 
-- **Temporal validity windows** — `ContextNode` and `ContextEdge` now carry `valid_from` / `valid_until` ISO datetime fields. Call `node.is_active(at_time=None)` to check whether a node is live at any point in time, or `graph.find_active_nodes(node_type, at_time)` to filter an entire graph by validity. Fields survive full serialisation round-trips via `save_to_file()` / `load_from_file()` and the `to_dict()` / `from_dict()` path.
-- **Weighted multi-hop BFS** — `get_neighbors(hops, min_weight=0.0)` now accepts a minimum edge weight so you can confine traversal to high-confidence causal links and ignore noisy or low-trust relationships. Fully backward-compatible — default `0.0` passes all edges.
-- **Cross-graph navigation** — `link_graph(other_graph, source_node, target_node)` creates a navigable bridge between two separate `ContextGraph` instances and returns a `link_id`. Call `navigate_to(link_id)` to jump to the target graph and entry node. Links now survive save/load: `save_to_file()` writes a `links` section, and `resolve_links({graph_id: instance})` reconnects them after reload. Each graph carries a stable `graph_id` UUID for this purpose.
-- **Bug fixes** — `is_active()` now normalises tz-aware `datetime` inputs to tz-naive UTC (prevents `TypeError`); cross-graph marker nodes are correctly typed `"cross_graph_link"` instead of polluting the graph with phantom `"entity"` nodes; 14 new dedicated tests in `tests/context/test_cross_graph_navigation.py`.
-
-### Decision Intelligence & Agent Context (0.3.0-alpha / beta)
-
-- **Complete decision lifecycle** — `record_decision()`, `add_decision()`, `add_causal_relationship()`, `trace_decision_chain()`, `analyze_decision_impact()`, `analyze_decision_influence()`, and `find_similar_decisions()` all working end-to-end with full audit trails.
-- **Precedent search** — hybrid similarity search over past decisions combining vector, structural, and category similarity with configurable weights; `find_precedents()` and `retrieve_decision_precedents()` fixed for correct entity extraction behaviour.
-- **PolicyEngine** — versioned policy nodes, compliance checking, `check_decision_rules()`, exception handling with `PolicyException`; falls back gracefully when no graph store is present.
-- **AgentContext** — unified wrapper with granular feature flags (`decision_tracking`, `kg_algorithms`, `graph_expansion`), `store()`, `retrieve()`, `get_conversation_history()`, `get_statistics()`; `capture_cross_system_inputs()` for multi-agent pipelines.
-- **AgentMemory** — working, conversation, and long-term memory tiers with statistics.
-- **Multi-hop context assembly** — `expand_context()`, `dynamic_context_traversal()`, and `multi_hop_context_assembly()` all fixed for correct BFS and decision-query behaviour.
-
-### Knowledge Graph Algorithms (0.3.0-alpha)
-
-- **Advanced analytics** — PageRank centrality (`calculate_pagerank`), betweenness centrality, clustering coefficient, community detection via Louvain; all return structured dicts.
-- **Node embeddings** — Node2Vec via `NodeEmbedder`; `compute_embeddings(graph, node_labels, relationship_types)`.
-- **Link prediction** — `LinkPredictor.score_link(graph, n1, n2, method=)` for scoring potential new edges.
-- **Similarity** — `SimilarityCalculator.cosine_similarity(v1, v2)`.
-- **Provenance** — `ProvenanceTracker`, `GraphBuilderWithProvenance`, `AlgorithmTrackerWithProvenance` with 9 domain-specific tracking methods; now correctly exported from `semantica.kg`.
-
-### Semantic Extraction (0.3.0-beta)
-
-- **Multi-founder LLM extraction fix** — unmatched subjects/objects now produce a synthetic `UNKNOWN` entity instead of silently dropping the relation; all co-founders from LLM responses are preserved.
-- **Reasoner inference fix** — `_match_pattern` rewritten to split on `?var` placeholders first; pre-bound variables resolve to exact literals, repeated variables use backreferences, non-greedy matching prevents over-consumption.
-- **Duplicate relation fix** — orphaned legacy block in `_parse_relation_result` that appended every relation twice has been removed.
-- **LLM-typed extraction** — `extraction_method` parameter correctly sets `"llm_typed"` metadata on typed extraction paths.
-
-### Export & Storage (0.3.0-beta)
-
-- **RDF export aliases** — `RDFExporter` now accepts `"ttl"`, `"nt"`, `"xml"`, `"rdf"`, and `"json-ld"` as format aliases; no API changes for existing callers.
-- **ArangoDB AQL export** — full AQL INSERT statement generation for vertices and edges; batch processing; `export_arango()` convenience function; auto-detected from `.aql` extension.
-- **Apache Parquet export** — columnar export with configurable compression (snappy, gzip, brotli, zstd, lz4); explicit Arrow schemas; `export_parquet()` convenience function; analytics-ready for Spark, Snowflake, BigQuery, Databricks.
-
-### Deduplication v2 (0.3.0-beta)
-
-- **Candidate generation v2** — `blocking_v2` and `hybrid_v2` strategies replace O(N²) pair enumeration with multi-key blocking, phonetic Soundex matching, and deterministic `max_candidates_per_entity` budgeting; **63.6% faster** in worst-case scenarios.
-- **Two-stage scoring prefilter** — fast type-mismatch, name-length-ratio, and token-overlap gates skip expensive semantic scoring for obvious non-matches; **18–25% faster** batch processing; configurable thresholds.
-- **Semantic relationship deduplication v2** — canonicalisation engine with predicate synonym mapping (`works_for` → `employed_by`), O(1) hash matching for exact canonical signatures, weighted scoring (60% predicate + 40% object); **6.98x faster** than legacy mode.
-- **`dedup_triplets()` fix** — critical infinite recursion bug fixed; function is now a first-class API in `methods.py`.
-
-### Incremental / Delta Processing (0.3.0-beta)
-
-- **Delta computation** — native diff between graph snapshots using SPARQL; only changed data flows through the pipeline.
-- **Version snapshot management** — graph URI tracking, metadata storage, snapshot retention with `prune_versions()`.
-- **Delta-aware pipelines** — `delta_mode` configuration in `PipelineBuilder`; processes only changes for near-real-time workloads.
-
-### Pipeline & Production (0.3.0-alpha / beta)
-
-- **FailureHandler** — `handle_failure(error, policy, retry_count)` with `LINEAR`, `EXPONENTIAL`, and `FIXED` backoff strategies via `RetryPolicy` / `RetryStrategy`.
-- **PipelineValidator** — `validate(builder)` returns `ValidationResult(valid, errors, warnings)`; does not raise exceptions.
-- **`add_step()` fix** — correctly returns the created `PipelineStep` object (return type annotation corrected to match).
-- **Retry loop fix** — execution engine now iterates up to `max_retries` correctly.
-
-### Graph Database Backends (0.3.0-alpha)
-
-- **Apache AGE** — PostgreSQL graph extension with openCypher via SQL; SQL injection vulnerabilities fixed; input validation added.
-- **AWS Neptune** — Amazon Neptune with IAM authentication.
-- **FalkorDB** — `DecisionQuery` and `CausalChainAnalyzer` work directly with FalkorDB row/header shapes.
-
-### Test Coverage
-
-- **886+ tests passing, 0 failures** across all modules — context (335), KG (~430), semantic extraction (70), reasoning (19), pipeline, export, deduplication.
-- Added **85 real-world comprehensive tests** (`test_030_realworld_comprehensive.py`) covering tech companies, CEOs, investment chains, and healthcare scenarios end-to-end.
-
-See the full [CHANGELOG](CHANGELOG.md) for the complete diff.
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the full per-contributor breakdown and [CHANGELOG](CHANGELOG.md) for the complete diff.
 
 ---
 
