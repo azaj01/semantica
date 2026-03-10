@@ -107,7 +107,7 @@ Production Use Cases:
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import uuid
 
@@ -127,6 +127,21 @@ except ImportError:
     KG_AVAILABLE = False
 
 
+def _parse_iso_dt(value: str) -> Optional[datetime]:
+    """Parse an ISO datetime string into a tz-naive UTC datetime.
+
+    Always returns a naive datetime in UTC so callers can compare uniformly
+    without worrying about mixed aware/naive arithmetic.
+    """
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except (ValueError, AttributeError):
+        return None
+
+
 @dataclass
 class ContextNode:
     """Context graph node (Internal implementation)."""
@@ -136,12 +151,37 @@ class ContextNode:
     content: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     properties: Dict[str, Any] = field(default_factory=dict)
+    valid_from: Optional[str] = None   # ISO datetime string, e.g. "2026-01-01T00:00:00"
+    valid_until: Optional[str] = None  # ISO datetime string; None = no expiry
+
+    def is_active(self, at_time: Optional[datetime] = None) -> bool:
+        """Return True if this node is active at the given time (defaults to now).
+
+        Both ``at_time`` and stored bounds are normalized to tz-naive UTC so that
+        callers may pass either aware or naive datetimes without raising TypeError.
+        """
+        if self.valid_from is None and self.valid_until is None:
+            return True
+        now = at_time if at_time is not None else datetime.utcnow()
+        if now.tzinfo is not None:
+            now = now.astimezone(timezone.utc).replace(tzinfo=None)
+        start = _parse_iso_dt(self.valid_from) if self.valid_from is not None else None
+        end = _parse_iso_dt(self.valid_until) if self.valid_until is not None else None
+        if start is not None and now < start:
+            return False
+        if end is not None and now > end:
+            return False
+        return True
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format."""
         props = self.properties.copy()
         props.update(self.metadata)
         props["content"] = self.content
+        if self.valid_from is not None:
+            props["valid_from"] = self.valid_from
+        if self.valid_until is not None:
+            props["valid_until"] = self.valid_until
         return {"id": self.node_id, "type": self.node_type, "properties": props}
 
 
@@ -154,16 +194,42 @@ class ContextEdge:
     edge_type: str
     weight: float = 1.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    valid_from: Optional[str] = None   # ISO datetime string
+    valid_until: Optional[str] = None  # ISO datetime string; None = no expiry
+
+    def is_active(self, at_time: Optional[datetime] = None) -> bool:
+        """Return True if this edge is active at the given time (defaults to now).
+
+        Both ``at_time`` and stored bounds are normalized to tz-naive UTC so that
+        callers may pass either aware or naive datetimes without raising TypeError.
+        """
+        if self.valid_from is None and self.valid_until is None:
+            return True
+        now = at_time if at_time is not None else datetime.utcnow()
+        if now.tzinfo is not None:
+            now = now.astimezone(timezone.utc).replace(tzinfo=None)
+        start = _parse_iso_dt(self.valid_from) if self.valid_from is not None else None
+        end = _parse_iso_dt(self.valid_until) if self.valid_until is not None else None
+        if start is not None and now < start:
+            return False
+        if end is not None and now > end:
+            return False
+        return True
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format."""
-        return {
+        d = {
             "source_id": self.source_id,
             "target_id": self.target_id,
             "type": self.edge_type,
             "weight": self.weight,
             "properties": self.metadata,
         }
+        if self.valid_from is not None:
+            d["valid_from"] = self.valid_from
+        if self.valid_until is not None:
+            d["valid_until"] = self.valid_until
+        return d
 
 
 class ContextGraph:
@@ -204,6 +270,9 @@ class ContextGraph:
 
         self.entity_linker = self.config.get("entity_linker") or EntityLinker()
 
+        # Stable identifier so this graph can be referenced after save/load
+        self.graph_id: str = str(uuid.uuid4())
+
         # Graph structure
         self.nodes: Dict[str, ContextNode] = {}
         self.edges: List[ContextEdge] = []
@@ -214,6 +283,11 @@ class ContextGraph:
         # Indexes
         self.node_type_index: Dict[str, Set[str]] = defaultdict(set)
         self.edge_type_index: Dict[str, List[ContextEdge]] = defaultdict(list)
+
+        # Cross-graph navigation: link_id -> (other_graph, source_node_id, target_node_id)
+        self._linked_graphs: Dict[str, Tuple["ContextGraph", str, str]] = {}
+        # Unresolved link metadata (populated after load_from_file, before resolve_links)
+        self._unresolved_links: Dict[str, Dict[str, str]] = {}
 
         # Progress tracker
         self.progress_tracker = get_progress_tracker()
@@ -261,7 +335,20 @@ class ContextGraph:
             # Extract content from properties if not explicit
             node_props = node.get("properties", {})
             content = node_props.get("content", node.get("id"))
-            metadata = {k: v for k, v in node_props.items() if k != "content"}
+            # Restore validity windows from properties (written there by ContextNode.to_dict)
+            # or from top-level keys on the node dict
+            valid_from = (
+                node.get("valid_from")
+                or node_props.get("valid_from")
+            )
+            valid_until = (
+                node.get("valid_until")
+                or node_props.get("valid_until")
+            )
+            metadata = {
+                k: v for k, v in node_props.items()
+                if k not in ("content", "valid_from", "valid_until")
+            }
 
             internal_node = ContextNode(
                 node_id=node.get("id"),
@@ -269,6 +356,8 @@ class ContextGraph:
                 content=content,
                 metadata=metadata,
                 properties=node_props,
+                valid_from=valid_from,
+                valid_until=valid_until,
             )
 
             if self._add_internal_node(internal_node):
@@ -288,12 +377,18 @@ class ContextGraph:
         """
         count = 0
         for edge in edges:
+            edge_props = edge.get("properties", {})
+            # Restore validity windows — ContextEdge.to_dict() writes them at top level
+            valid_from = edge.get("valid_from") or edge_props.get("valid_from")
+            valid_until = edge.get("valid_until") or edge_props.get("valid_until")
             internal_edge = ContextEdge(
                 source_id=edge.get("source_id"),
                 target_id=edge.get("target_id"),
                 edge_type=edge.get("type", "related_to"),
                 weight=edge.get("weight", 1.0),
-                metadata=edge.get("properties", {}),
+                metadata=edge_props,
+                valid_from=valid_from,
+                valid_until=valid_until,
             )
 
             if self._add_internal_edge(internal_edge):
@@ -362,11 +457,21 @@ class ContextGraph:
         node_id: str,
         hops: int = 1,
         relationship_types: Optional[List[str]] = None,
+        min_weight: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """
         Get neighbors of a node.
 
-        Returns list of dicts with neighbor info.
+        Args:
+            node_id: Starting node ID.
+            hops: Maximum number of hops to traverse (BFS depth).
+            relationship_types: Optional whitelist of edge types to follow.
+            min_weight: Minimum edge weight required to traverse an edge (default 0.0
+                means all edges pass). Use e.g. ``min_weight=0.5`` to follow only
+                strong/high-confidence relationships.
+
+        Returns:
+            List of dicts with neighbor info (id, type, content, relationship, weight, hop).
         """
         if node_id not in self.nodes:
             return []
@@ -384,6 +489,8 @@ class ContextGraph:
             outgoing_edges = self._adjacency.get(current_id, [])
             for edge in outgoing_edges:
                 if rel_filter is not None and edge.edge_type not in rel_filter:
+                    continue
+                if edge.weight < min_weight:
                     continue
                 neighbor_id = edge.target_id
                 if neighbor_id in visited:
@@ -451,9 +558,12 @@ class ContextGraph:
             node_id: Unique identifier
             node_type: Node type (e.g., 'entity', 'concept')
             content: Node content/label
-            **properties: Additional properties
+            **properties: Additional properties. Use `valid_from` and `valid_until`
+                (ISO datetime strings) to define a temporal validity window.
         """
         content = content or node_id
+        valid_from = properties.pop("valid_from", None)
+        valid_until = properties.pop("valid_until", None)
         return self._add_internal_node(
             ContextNode(
                 node_id=node_id,
@@ -461,6 +571,8 @@ class ContextGraph:
                 content=content,
                 metadata=properties,
                 properties=properties,
+                valid_from=valid_from,
+                valid_until=valid_until,
             )
         )
 
@@ -480,8 +592,11 @@ class ContextGraph:
             target_id: Target node ID
             edge_type: Relationship type
             weight: Edge weight
-            **properties: Additional properties
+            **properties: Additional properties. Use `valid_from` and `valid_until`
+                (ISO datetime strings) to define a temporal validity window.
         """
+        valid_from = properties.pop("valid_from", None)
+        valid_until = properties.pop("valid_until", None)
         return self._add_internal_edge(
             ContextEdge(
                 source_id=source_id,
@@ -489,6 +604,8 @@ class ContextGraph:
                 edge_type=edge_type,
                 weight=weight,
                 metadata=properties,
+                valid_from=valid_from,
+                valid_until=valid_until,
             )
         )
 
@@ -501,9 +618,24 @@ class ContextGraph:
         """
         import json
 
+        # Serialise cross-graph link metadata (object references are not serialisable,
+        # so we store other_graph_id; callers can reconnect with resolve_links()).
+        links_data = []
+        for link_id, (other_graph, source_node_id, target_node_id) in self._linked_graphs.items():
+            links_data.append(
+                {
+                    "link_id": link_id,
+                    "source_node_id": source_node_id,
+                    "target_node_id": target_node_id,
+                    "other_graph_id": other_graph.graph_id,
+                }
+            )
+
         data = {
+            "graph_id": self.graph_id,
             "nodes": [node.to_dict() for node in self.nodes.values()],
             "edges": [edge.to_dict() for edge in self.edges],
+            "links": links_data,
         }
 
         with open(path, "w", encoding="utf-8") as f:
@@ -534,6 +666,12 @@ class ContextGraph:
         self._adjacency.clear()
         self.node_type_index.clear()
         self.edge_type_index.clear()
+        self._linked_graphs.clear()
+        self._unresolved_links.clear()
+
+        # Restore stable graph identity
+        if "graph_id" in data:
+            self.graph_id = data["graph_id"]
 
         # Load nodes
         nodes = data.get("nodes", [])
@@ -542,6 +680,12 @@ class ContextGraph:
         # Load edges
         edges = data.get("edges", [])
         self.add_edges(edges)
+
+        # Restore link metadata — object references require resolve_links() to reconnect
+        for link_meta in data.get("links", []):
+            link_id = link_meta.get("link_id")
+            if link_id:
+                self._unresolved_links[link_id] = link_meta
 
         self.logger.info(f"Loaded context graph from {path}")
 
@@ -577,6 +721,177 @@ class ContextGraph:
             }
             for n in nodes
         ]
+
+    def find_active_nodes(
+        self,
+        node_type: Optional[str] = None,
+        at_time: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Find nodes that are currently active within their validity window.
+
+        Nodes without ``valid_from``/``valid_until`` are always considered active.
+
+        Args:
+            node_type: Optional node type filter.
+            at_time: Point in time to evaluate validity (defaults to ``datetime.utcnow()``).
+
+        Returns:
+            List of active node dicts (same format as :meth:`find_nodes`).
+        """
+        now = at_time or datetime.utcnow()
+        if node_type:
+            node_ids = self.node_type_index.get(node_type, set())
+            nodes_iter = [self.nodes[nid] for nid in node_ids if nid in self.nodes]
+        else:
+            nodes_iter = list(self.nodes.values())
+
+        result = []
+        for node in nodes_iter:
+            if node.is_active(now):
+                result.append(
+                    {
+                        "id": node.node_id,
+                        "type": node.node_type,
+                        "content": node.content,
+                        "metadata": {
+                            **(getattr(node, "metadata", {}) or {}),
+                            **(getattr(node, "properties", {}) or {}),
+                        },
+                    }
+                )
+        return result
+
+    def link_graph(
+        self,
+        other_graph: "ContextGraph",
+        source_node_id: str,
+        target_node_id: str,
+        link_type: str = "CROSS_GRAPH",
+    ) -> str:
+        """
+        Create a navigable link from a node in this graph to a node in another graph.
+
+        This enables cross-graph navigation: separate ContextGraph instances can be
+        linked hierarchically, allowing agents to traverse from one problem space into
+        a related one without merging the graphs (like "a dream within a dream").
+
+        Args:
+            other_graph: The target ContextGraph instance.
+            source_node_id: Node ID in *this* graph that serves as the exit point.
+            target_node_id: Node ID in *other_graph* that serves as the entry point.
+            link_type: Edge type label for the cross-graph bridge (default "CROSS_GRAPH").
+
+        Returns:
+            A unique link ID that can be passed to :meth:`navigate_to`.
+
+        Raises:
+            KeyError: If source_node_id is not in this graph or target_node_id is not
+                in other_graph.
+        """
+        if source_node_id not in self.nodes:
+            raise KeyError(f"Source node '{source_node_id}' not found in this graph")
+        if target_node_id not in other_graph.nodes:
+            raise KeyError(f"Target node '{target_node_id}' not found in other_graph")
+
+        link_id = str(uuid.uuid4())
+        self._linked_graphs[link_id] = (other_graph, source_node_id, target_node_id)
+
+        # Create a dedicated marker node so it is clearly typed and does not pollute
+        # the entity namespace. _add_internal_edge auto-creates missing targets as
+        # "entity" nodes — by pre-inserting a "cross_graph_link" node we prevent that.
+        marker_node_id = f"__cross_graph_{link_id}"
+        self._add_internal_node(
+            ContextNode(
+                node_id=marker_node_id,
+                node_type="cross_graph_link",
+                content=f"Cross-graph link → {target_node_id}",
+                metadata={"cross_graph": True, "link_id": link_id, "target_node_id": target_node_id},
+                properties={},
+            )
+        )
+        # Record a marker edge so the link shows up in graph traversal
+        self._add_internal_edge(
+            ContextEdge(
+                source_id=source_node_id,
+                target_id=marker_node_id,
+                edge_type=link_type,
+                weight=1.0,
+                metadata={"cross_graph": True, "link_id": link_id},
+            )
+        )
+        return link_id
+
+    def navigate_to(self, link_id: str) -> Tuple["ContextGraph", str]:
+        """
+        Navigate to the target graph and entry node for a cross-graph link.
+
+        Args:
+            link_id: Link ID returned by :meth:`link_graph`.
+
+        Returns:
+            Tuple of ``(other_graph, target_node_id)``.
+
+        Raises:
+            KeyError: If link_id is not registered on this graph.
+        """
+        if link_id not in self._linked_graphs:
+            if link_id in self._unresolved_links:
+                meta = self._unresolved_links[link_id]
+                raise KeyError(
+                    f"Cross-graph link '{link_id}' exists but its target graph "
+                    f"(graph_id={meta.get('other_graph_id')!r}) has not been reconnected. "
+                    "Call resolve_links({graph_id: graph_instance, ...}) to restore navigation."
+                )
+            raise KeyError(
+                f"No cross-graph link '{link_id}' found. "
+                "Call link_graph() first to create the link."
+            )
+        other_graph, _, target_node_id = self._linked_graphs[link_id]
+        return other_graph, target_node_id
+
+    def resolve_links(self, graphs: Dict[str, "ContextGraph"]) -> int:
+        """
+        Reconnect cross-graph links after a :meth:`load_from_file` call.
+
+        Since ``other_graph`` object references cannot be serialised, links are stored
+        as metadata only (``other_graph_id``).  Call this method with a mapping of
+        ``{graph_id: graph_instance}`` to restore live navigation.
+
+        Args:
+            graphs: Mapping of graph_id strings to ContextGraph instances.
+
+        Returns:
+            Number of links successfully resolved.
+
+        Example::
+
+            g1.save_to_file("g1.json")
+            g2.save_to_file("g2.json")
+
+            g1b, g2b = ContextGraph(), ContextGraph()
+            g1b.load_from_file("g1.json")
+            g2b.load_from_file("g2.json")
+            resolved = g1b.resolve_links({g2b.graph_id: g2b})
+        """
+        resolved = 0
+        for link_id, meta in list(self._unresolved_links.items()):
+            other_graph_id = meta.get("other_graph_id")
+            if other_graph_id in graphs:
+                other_graph = graphs[other_graph_id]
+                source_node_id = meta["source_node_id"]
+                target_node_id = meta["target_node_id"]
+                # Validate target node still exists in the restored graph
+                if target_node_id in other_graph.nodes:
+                    self._linked_graphs[link_id] = (other_graph, source_node_id, target_node_id)
+                    del self._unresolved_links[link_id]
+                    resolved += 1
+                else:
+                    self.logger.warning(
+                        f"resolve_links: target node '{target_node_id}' not found in "
+                        f"graph '{other_graph_id}' for link '{link_id}'"
+                    )
+        return resolved
 
     def find_edges(self, edge_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """Find edges, optionally filtered by type."""
@@ -914,26 +1229,38 @@ class ContextGraph:
 
     def to_dict(self) -> Dict[str, Any]:
         """Export graph to dictionary format."""
+        nodes_out = []
+        for n in self.nodes.values():
+            entry: Dict[str, Any] = {
+                "id": n.node_id,
+                "type": n.node_type,
+                "content": n.content,
+                "properties": n.properties,
+                "metadata": n.metadata,
+            }
+            if n.valid_from is not None:
+                entry["valid_from"] = n.valid_from
+            if n.valid_until is not None:
+                entry["valid_until"] = n.valid_until
+            nodes_out.append(entry)
+
+        edges_out = []
+        for e in self.edges:
+            entry = {
+                "source": e.source_id,
+                "target": e.target_id,
+                "type": e.edge_type,
+                "weight": e.weight,
+            }
+            if e.valid_from is not None:
+                entry["valid_from"] = e.valid_from
+            if e.valid_until is not None:
+                entry["valid_until"] = e.valid_until
+            edges_out.append(entry)
+
         return {
-            "nodes": [
-                {
-                    "id": n.node_id,
-                    "type": n.node_type,
-                    "content": n.content,
-                    "properties": n.properties,
-                    "metadata": n.metadata,
-                }
-                for n in self.nodes.values()
-            ],
-            "edges": [
-                {
-                    "source": e.source_id,
-                    "target": e.target_id,
-                    "type": e.edge_type,
-                    "weight": e.weight,
-                }
-                for e in self.edges
-            ],
+            "nodes": nodes_out,
+            "edges": edges_out,
             "statistics": {
                 "node_count": len(self.nodes),
                 "edge_count": len(self.edges),
@@ -945,26 +1272,31 @@ class ContextGraph:
         # Clear existing graph
         self.nodes.clear()
         self.edges.clear()
-        
-        # Add nodes
+
+        # Add nodes — restore validity windows if present
         for node_data in graph_dict.get("nodes", []):
+            node_props = node_data.get("properties", {})
             node = ContextNode(
                 node_id=node_data["id"],
                 node_type=node_data["type"],
                 content=node_data.get("content", ""),
-                properties=node_data.get("properties", {}),
-                metadata=node_data.get("metadata", {})
+                properties=node_props,
+                metadata=node_data.get("metadata", {}),
+                valid_from=node_data.get("valid_from") or node_props.get("valid_from"),
+                valid_until=node_data.get("valid_until") or node_props.get("valid_until"),
             )
             self._add_internal_node(node)
-        
-        # Add edges
+
+        # Add edges — restore validity windows if present
         for edge_data in graph_dict.get("edges", []):
             edge = ContextEdge(
                 source_id=edge_data["source"],
                 target_id=edge_data["target"],
                 edge_type=edge_data["type"],
                 weight=edge_data.get("weight", 1.0),
-                metadata=edge_data.get("metadata", {})
+                metadata=edge_data.get("metadata", {}),
+                valid_from=edge_data.get("valid_from"),
+                valid_until=edge_data.get("valid_until"),
             )
             self._add_internal_edge(edge)
 

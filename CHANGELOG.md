@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Context Graph Feature Completeness** (by @KaifAhmad1):
+  - Added `valid_from` / `valid_until` temporal validity fields to `ContextNode` and `ContextEdge` dataclasses — both expose `is_active(at_time=None) -> bool`; nodes/edges without these fields are always considered active
+  - Added `add_node(valid_from=..., valid_until=...)` and `add_edge(valid_from=..., valid_until=...)` support — validity windows are extracted from `**properties` and stored as first-class dataclass fields, not in metadata
+  - Added `ContextGraph.find_active_nodes(node_type=None, at_time=None)` — returns only nodes whose validity window includes the given time (defaults to `datetime.utcnow()`); complements `find_nodes()` with temporal filtering
+  - Added `min_weight: float = 0.0` parameter to `ContextGraph.get_neighbors()` — edges with weight below the threshold are skipped during BFS traversal, enabling weighted/confidence-filtered multi-hop navigation; fully backward-compatible (default 0.0 passes all edges)
+  - Added `ContextGraph.link_graph(other_graph, source_node_id, target_node_id, link_type="CROSS_GRAPH") -> str` — creates a navigable bridge between two separate `ContextGraph` instances; records a marker edge internally and returns a `link_id`
+  - Added `ContextGraph.navigate_to(link_id) -> (other_graph, target_node_id)` — resolves a `link_id` to the target graph and its entry node, enabling hierarchical cross-graph traversal (e.g. agent moving from a high-level decision graph into a domain-specific sub-graph)
+  - Fixed `pipeline_builder.add_step()` return type annotation from `"PipelineBuilder"` to `"PipelineStep"` — implementation was already correct per 0.3.0-beta changelog, only signature and docstring were stale
+  - Fixed `test_hybrid_search_performance` timing threshold from `< 1.0s` to `< 5.0s` — real `sentence-transformers` (384-dim) on development machines exceeds the 1.0s gate; consistent with the vector store batch threshold relaxation applied in 0.3.0-beta
+
+## [0.3.0] - 2026-03-10
+
 - **0.3.0 Bug Fixes & Comprehensive Real-World Tests** (by @KaifAhmad1):
   - Fixed `ProvenanceTracker` missing from `semantica/kg/__init__.py` exports — `from semantica.kg import ProvenanceTracker` now works correctly
   - Fixed duplicate relation creation in `_parse_relation_result` — orphaned legacy block was appending every relation twice; removed the duplicate block

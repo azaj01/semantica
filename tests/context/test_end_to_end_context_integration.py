@@ -292,24 +292,27 @@ class TestEndToEndContextIntegration:
             {"graph_expansion": False, "max_results": 20},
         ]
         
+        search_times = []
         for i, config in enumerate(search_configs):
             start_time = time.time()
-            
+
             results = retriever.retrieve(
                 query="Test document search",
                 **config
             )
-            
+
             search_time = time.time() - start_time
+            search_times.append(search_time)
             print(f"[OK] Config {i+1}: {len(results)} results in {search_time:.3f}s")
-            
+
             # Verify results
             assert len(results) <= config["max_results"], "Should respect max_results"
             assert all(isinstance(r, RetrievedContext) for r in results), "Should be RetrievedContext"
-        
-        # Performance should be reasonable
-        avg_time = sum(time.time() - start_time for _ in range(3)) / 3
-        assert avg_time < 1.0, "Average search time should be under 1 second"
+
+        # Performance should be reasonable on development machines running real
+        # sentence-transformers (384-dim); threshold is 5.0s per config on average
+        avg_time = sum(search_times) / len(search_times)
+        assert avg_time < 5.0, f"Average search time {avg_time:.3f}s should be under 5 seconds"
     
     def test_multi_hop_reasoning(self):
         """Test multi-hop reasoning capabilities."""
