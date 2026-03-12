@@ -3,7 +3,8 @@ Reasoning Module
 
 This module provides reasoning and inference capabilities for knowledge graph
 analysis and query answering, supporting multiple reasoning strategies including
-rule-based inference via Rete, SPARQL reasoning, abductive and deductive reasoning.
+rule-based inference via Rete, SPARQL reasoning, abductive and deductive reasoning,
+and native Datalog evaluation.
 """
 
 from .reasoner import Reasoner, InferenceResult, Rule, Fact, RuleType
@@ -25,6 +26,8 @@ from .rete_engine import (
 )
 from .sparql_reasoner import SPARQLQueryResult, SPARQLReasoner
 
+from .datalog_reasoner import DatalogReasoner, DatalogFact, DatalogRule
+
 __all__ = [
     # Reasoner facade
     "Reasoner",
@@ -43,6 +46,10 @@ __all__ = [
     # SPARQL reasoning
     "SPARQLReasoner",
     "SPARQLQueryResult",
+    # Datalog reasoning
+    "DatalogReasoner",
+    "DatalogFact",
+    "DatalogRule",
     # Explanation
     "ExplanationGenerator",
     "Explanation",
