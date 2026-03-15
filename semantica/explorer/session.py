@@ -128,20 +128,23 @@ class GraphSession:
     ) -> tuple[list[dict[str, Any]], int]:
         """Return a paginated slice of nodes and the total count."""
         with self._lock:
-            all_nodes = self.graph.find_nodes(node_type=node_type)
-
-        # Optional keyword filter
-        if search:
-            search_lower = search.lower()
-            all_nodes = [
-                n for n in all_nodes
-                if search_lower in n.get("id", "").lower()
-                or search_lower in n.get("content", "").lower()
-                or search_lower in str(n.get("metadata", {})).lower()
-            ]
-
-        total = len(all_nodes)
-        page = all_nodes[skip: skip + limit]
+            # We fetch all nodes if there is a search filter as we need to filter them in memory,
+            # otherwise we let the context graph handle the pagination natively.
+            if search:
+                all_nodes = self.graph.find_nodes(node_type=node_type)
+                search_lower = search.lower()
+                all_nodes = [
+                    n for n in all_nodes
+                    if search_lower in n.get("id", "").lower()
+                    or search_lower in n.get("content", "").lower()
+                    or search_lower in str(n.get("metadata", {})).lower()
+                ]
+                total = len(all_nodes)
+                page = all_nodes[skip: skip + limit]
+            else:
+                total = self.graph.stats().get("node_types", {}).get(node_type, 0) if node_type else self.graph.stats().get("node_count", 0)
+                page = self.graph.find_nodes(node_type=node_type, skip=skip, limit=limit)
+                
         return page, total
 
     def get_edges(
@@ -154,15 +157,18 @@ class GraphSession:
     ) -> tuple[list[dict[str, Any]], int]:
         """Return a paginated slice of edges and the total count."""
         with self._lock:
-            all_edges = self.graph.find_edges(edge_type=edge_type)
-
-        if source:
-            all_edges = [e for e in all_edges if e.get("source") == source]
-        if target:
-            all_edges = [e for e in all_edges if e.get("target") == target]
-
-        total = len(all_edges)
-        page = all_edges[skip: skip + limit]
+            if source or target:
+                all_edges = self.graph.find_edges(edge_type=edge_type)
+                if source:
+                    all_edges = [e for e in all_edges if e.get("source") == source]
+                if target:
+                    all_edges = [e for e in all_edges if e.get("target") == target]
+                total = len(all_edges)
+                page = all_edges[skip: skip + limit]
+            else:
+                total = self.graph.stats().get("edge_types", {}).get(edge_type, 0) if edge_type else self.graph.stats().get("edge_count", 0)
+                page = self.graph.find_edges(edge_type=edge_type, skip=skip, limit=limit)
+                
         return page, total
 
     def get_neighbors(self, node_id: str, depth: int = 1) -> List[Dict[str, Any]]:
