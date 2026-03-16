@@ -103,8 +103,8 @@ async def temporal_patterns(
         detector = TemporalPatternDetector()
 
 
-        nodes, _ = session.get_nodes(skip=0, limit=999_999)
-        edges, _ = session.get_edges(skip=0, limit=999_999)
+        nodes, _ = await asyncio.to_thread(session.get_nodes, skip=0, limit=999_999)
+        edges, _ = await asyncio.to_thread(session.get_edges, skip=0, limit=999_999)
         graph_dict = {
             "entities": [
                 {"id": n.get("id"), "type": n.get("type"), "metadata": n.get("metadata", {})}
