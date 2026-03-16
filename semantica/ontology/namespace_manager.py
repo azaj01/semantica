@@ -206,6 +206,31 @@ class NamespaceManager:
             Dictionary of prefix -> URI mappings
         """
         return dict(self.namespaces)
+    
+    def get_alignment_predicates(self) -> Dict[str, str]:
+        """
+        Get standard alignment predicates for ontology mapping.
+        
+        Returns:
+            Dictionary mapping common alignment types to their full URIs.
+        """
+        owl_ns = self.get_namespace("owl")
+        skos_ns = self.get_namespace("skos")
+        
+        return {
+            #OWL alignments
+            "equivalentClass": f"{owl_ns}equivalentClass",
+            "equivalentProperty": f"{owl_ns}equivalentProperty",
+            "sameAs": f"{owl_ns}sameAs",
+            #SKOS alignments
+            "exactMatch": f"{skos_ns}exactMatch",
+            "closeMatch": f"{skos_ns}closeMatch",
+            "broadMatch": f"{skos_ns}broadMatch",
+            "narrowMatch": f"{skos_ns}narrowMatch",
+            "relatedMatch": f"{skos_ns}relatedMatch",
+            
+        }
+        
 
     def _to_pascal_case(self, name: str) -> str:
         """Convert name to PascalCase."""

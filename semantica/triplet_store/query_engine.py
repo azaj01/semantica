@@ -267,6 +267,88 @@ class QueryEngine:
             execution_steps=execution_steps,
             metadata={"optimization_enabled": self.enable_optimization},
         )
+    
+    def expand_entity_uri(self, entity_uri: str, store_backend: Any, use_alignments: bool = False) -> List[str]:
+        """
+        Expand an entity URI to include all aligned/equivalent entities.
+
+        Args:
+            entity_uri: The original URI to expand
+            store_backend: Triplet store backend to query
+            use_alignments: If False, returns only the original URI
+
+        Returns:
+            List of URIs including the original and any aligned entities
+        """
+        if not use_alignments:
+            return [entity_uri]
+
+        tracking_id = self.progress_tracker.start_tracking(
+            module="triplet_store",
+            submodule="QueryEngine",
+            message=f"Expanding alignments for: {entity_uri}"
+        )
+
+        # SPARQL query to find bidirectional alignments
+        
+        safe_uri = self._sanitize_uri(entity_uri)
+        query = f"""
+        SELECT DISTINCT ?aligned WHERE {{
+            {{ <{safe_uri}> ?p ?aligned }}
+            UNION
+            {{ ?aligned ?p <{safe_uri}> }}
+            
+            FILTER (?p IN (
+                <http://www.w3.org/2002/07/owl#equivalentClass>,
+                <http://www.w3.org/2002/07/owl#equivalentProperty>,
+                <http://www.w3.org/2002/07/owl#sameAs>,
+                <http://www.w3.org/2004/02/skos/core#exactMatch>,
+                <http://www.w3.org/2004/02/skos/core#closeMatch>,
+                <http://www.w3.org/2004/02/skos/core#broadMatch>,
+                <http://www.w3.org/2004/02/skos/core#narrowMatch>,
+                <http://www.w3.org/2004/02/skos/core#relatedMatch>
+            ))
+        }}
+        """
+
+        expanded_uris = set([entity_uri])
+        try:
+            if hasattr(store_backend, "execute_sparql"):
+                result_data = store_backend.execute_sparql(query)
+                for binding in result_data.get("bindings", []):
+                    val = binding.get("aligned", {})
+                    uri = val.get("value") if isinstance(val, dict) else val
+                    if uri:
+                        expanded_uris.add(uri)
+            else:
+                self.logger.warning(
+                    "store_backend does not support execute_sparql; returning original URI only"
+                )
+            self.progress_tracker.stop_tracking(
+                tracking_id,
+                status="completed",
+                message=f"Expanded to {len(expanded_uris)} URIs"
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to expand alignments for {entity_uri}: {e}")
+            self.progress_tracker.stop_tracking(tracking_id, status="failed", message=str(e))
+
+        return list(expanded_uris)
+
+    def build_values_clause(self, variable_name: str, uris: List[str]) -> str:
+        """
+        Helper to generate a SPARQL VALUES clause for a list of URIs.
+        Allows higher-level components to build alignment-aware queries.
+        
+        Example:
+            uris = engine.expand_entity_uri("http://ex.org/Person", store, use_alignments=True)
+            clause = engine.build_values_clause("subject", uris)
+            # Returns: VALUES ?subject { <http://ex.org/Person> <http://other.org/Human> }
+        """
+        if not uris:
+            return ""
+        formatted_uris = " ".join([f"<{self._sanitize_uri(uri)}>" for uri in uris])
+        return f"VALUES ?{variable_name} {{ {formatted_uris} }}"
 
     def _validate_query(self, query: str) -> bool:
         """Validate SPARQL query syntax (basic)."""
@@ -344,6 +426,12 @@ class QueryEngine:
 
         cache_key = self._get_cache_key(query)
         self.query_cache[cache_key] = result
+    
+    def _sanitize_uri(self, uri: str) -> str:
+        """Prevent SPARQL injection by percent-encoding dangerous characters."""
+        if not isinstance(uri, str):
+            return ""
+        return uri.replace("<", "%3C").replace(">", "%3E")
 
     def clear_cache(self) -> None:
         """Clear query cache."""

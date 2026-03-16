@@ -152,6 +152,8 @@ SPARQL query execution and optimization engine.
 |--------|-------------|-----------|
 | `execute(query)` | Execute SPARQL query | Query execution |
 | `optimize(query)` | Optimize SPARQL query | Query rewriting |
+| `expand_entity_uri(uri, store, ...)` | Expand aligned entity URIs | Bidirectional SPARQL lookup |
+| `build_values_clause(var, uris)` | Generate VALUES clause | String formatting |
 
 ---
 
@@ -203,4 +205,41 @@ WHERE {
 LIMIT 10
 """
 results = store.execute_query(query)
+```
+### Alignment-Aware Queries
+
+In complex enterprise environments with multiple data sources, you may want queries to seamlessly retrieve instances across aligned classes. For example, retrieving all http://schema.org/Person instances when querying for your internal http://internal.org/ontology/Employee class.
+
+The QueryEngine provides helper methods to expand entity URIs based on stored alignments (e.g., owl:equivalentClass, owl:sameAs, skos:exactMatch) and safely inject them into your queries using SPARQL VALUES clauses.
+
+Expanding URIs in Queries
+You can expand a URI and build an alignment-aware query dynamically:
+
+```python
+from semantica.triplet_store.query_engine import QueryEngine
+
+engine = QueryEngine()
+
+# i) Expand the base URI to include all aligned equivalents
+expanded_uris = engine.expand_entity_uri(
+    entity_uri="[http://internal.org/ontology/Employee](http://internal.org/ontology/Employee)",
+    store_backend=store_backend,
+    use_alignments=True
+)
+
+# ii) Build a SPARQL VALUES clause
+values_clause = engine.build_values_clause("entity_class", expanded_uris)
+# Result: VALUES ?entity_class { [http://internal.org/ontology/Employee](http://internal.org/ontology/Employee) [http://schema.org/Person](http://schema.org/Person) }
+
+# iii) Inject the clause into your query template
+query = f"""
+SELECT ?instance ?name WHERE {{
+    {values_clause}
+    ?instance a ?entity_class .
+    ?instance [http://schema.org/name](http://schema.org/name) ?name .
+}}
+"""
+
+# Execute the query to retrieve results across all aligned ontologies
+results = engine.execute_query(query, store_backend)
 ```

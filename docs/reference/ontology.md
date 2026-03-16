@@ -250,6 +250,56 @@ ontology:
 
 ---
 
+## Ontology Alignment
+
+Semantica supports mapping and connecting different ontologies to unify data across systems, standards, and domains. This enables cross-system interoperability, allowing a single semantic layer to span multiple standards (e.g., internal models and industry standards).
+
+Alignments are represented using standard RDF predicates such as `owl:equivalentClass`, `owl:equivalentProperty`, and `skos:exactMatch`.
+
+### Creating and Managing Alignments
+
+You can create and query alignments programmatically using the `OntologyEngine`:
+
+```python
+from semantica.ontology.engine import OntologyEngine
+from semantica.triplet_store.triplet_store import TripletStore
+
+# Setup the store and engine (using Blazegraph as an example)
+my_triplet_store = TripletStore(backend="blazegraph")
+engine = OntologyEngine(store=my_triplet_store)
+
+# Create an alignment between an internal class and a standard schema
+engine.create_alignment(
+    source_uri="http://internal.org/ontology/Employee",
+    target_uri="http://schema.org/Person",
+    predicate="http://www.w3.org/2002/07/owl#equivalentClass"
+)
+
+# Retrieve all bidirectional alignments for a specific entity
+alignments = engine.get_alignments("http://internal.org/ontology/Employee")
+```
+### Automated Alignment Suggestions
+
+When importing or merging external ontologies, the ReuseManager can automatically suggest alignments based on heuristic matching (such as identical labels with differing URIs).
+
+```python
+from semantica.ontology.reuse_manager import ReuseManager
+
+manager = ReuseManager()
+
+# Merge ontologies and auto-compute alignment suggestions
+merged_ontology = manager.merge_ontology_data(
+    target=internal_ontology,
+    source=industry_ontology,
+    compute_alignments=True
+)
+
+# Suggestions are stored in merged_ontology["suggested_alignments"]
+```
+
+For executing SPARQL queries that utilize these alignments to retrieve cross-ontology results, see the [Triplet Store Alignment-Aware Queries](triplet_store.md#alignment-aware-queries)
+
+
 ## Integration Examples
 
 ### Schema-First Knowledge Graph

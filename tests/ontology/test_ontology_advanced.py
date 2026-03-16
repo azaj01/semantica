@@ -8,6 +8,8 @@ from semantica.ontology.ontology_evaluator import OntologyEvaluator, EvaluationR
 from semantica.ontology.competency_questions import CompetencyQuestionsManager, CompetencyQuestion
 from semantica.change_management import VersionManager, OntologyVersion
 from semantica.ontology.associative_class import AssociativeClassBuilder, AssociativeClass
+from semantica.ontology.reuse_manager import ReuseManager
+from semantica.ontology.engine import OntologyEngine
 
 class TestOntologyAdvanced(unittest.TestCase):
 
@@ -151,6 +153,62 @@ class TestOntologyAdvanced(unittest.TestCase):
                 self.assertEqual(len(is_valid), 0)
         except Exception:
             pass
+    
+    def test_reuse_manager_suggest_alignments(self):
+        manager = ReuseManager()
+        target = {
+            "classes": [{"uri": "http://target.org/Person", "name": "Person"}],
+            "properties": [{"uri": "http://target.org/hasName", "name": "has name"}]
+        }
+        source = {
+            "classes": [{"uri": "http://source.org/Person", "name": "Person"}],
+            "properties": [{"uri": "http://source.org/hasName", "name": "has name"}]
+        }
+        
+        suggestions = manager.suggest_alignments(target, source)
+        
+        self.assertEqual(len(suggestions), 2)
+        self.assertEqual(suggestions[0]["predicate"], "http://www.w3.org/2002/07/owl#equivalentClass")
+        self.assertEqual(suggestions[0]["source_uri"], "http://source.org/Person")
+        self.assertEqual(suggestions[1]["predicate"], "http://www.w3.org/2002/07/owl#equivalentProperty")
+
+    def test_reuse_manager_merge_with_alignments(self):
+        manager = ReuseManager()
+        target = {"classes": [{"uri": "http://target.org/Dog", "name": "Dog"}]}
+        source = {"classes": [{"uri": "http://source.org/Dog", "name": "Dog"}]}
+        
+        merged = manager.merge_ontology_data(target, source, compute_alignments=True)
+        
+        self.assertIn("suggested_alignments", merged)
+        self.assertEqual(len(merged["suggested_alignments"]), 1)
+        self.assertEqual(merged["suggested_alignments"][0]["target_uri"], "http://target.org/Dog")
+
+    def test_engine_create_alignment(self):
+        mock_store = MagicMock()
+        engine = OntologyEngine(store=mock_store)
+        
+        engine.create_alignment("http://source.org/1", "http://target.org/2", "http://www.w3.org/2002/07/owl#sameAs")
+        
+        mock_store.add_triplet.assert_called_once()
+        args, kwargs = mock_store.add_triplet.call_args
+        self.assertEqual(args[0].subject, "http://source.org/1")
+        self.assertEqual(args[0].object, "http://target.org/2")
+        self.assertEqual(args[0].predicate, "http://www.w3.org/2002/07/owl#sameAs")
+
+    def test_engine_get_alignments(self):
+        mock_store = MagicMock()
+        mock_result = MagicMock()
+        # Mocking the SPARQL binding response format
+        mock_result.bindings = [
+            {"s": {"value": "http://source.org/1"}, "p": {"value": "http://owl#sameAs"}, "o": {"value": "http://target.org/2"}}
+        ]
+        mock_store.execute_query.return_value = mock_result
+        
+        engine = OntologyEngine(store=mock_store)
+        alignments = engine.get_alignments("http://source.org/1")
+        
+        self.assertEqual(len(alignments), 1)
+        self.assertEqual(alignments[0]["target"], "http://target.org/2")
 
 if __name__ == '__main__':
     unittest.main()

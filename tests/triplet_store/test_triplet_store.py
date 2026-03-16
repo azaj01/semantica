@@ -98,3 +98,67 @@ class TestTripletStore(unittest.TestCase):
         
         self.assertTrue(result["success"])
         mock_backend_instance.delete_triplet.assert_called_once_with(triplet)
+    
+    def test_query_engine_build_values_clause(self):
+        engine = QueryEngine()
+        uris = ["http://ex.org/1", "http://ex.org/2"]
+        
+        clause = engine.build_values_clause("subject", uris)
+        self.assertEqual(clause, "VALUES ?subject { <http://ex.org/1> <http://ex.org/2> }")
+        
+        empty_clause = engine.build_values_clause("subject", [])
+        self.assertEqual(empty_clause, "")
+
+    def test_query_engine_expand_entity_uri_disabled(self):
+        engine = QueryEngine()
+        mock_backend = MagicMock()
+        
+        result = engine.expand_entity_uri("http://ex.org/1", mock_backend, use_alignments=False)
+        
+        # Should return only the original URI and NOT query the store
+        self.assertEqual(result, ["http://ex.org/1"])
+        mock_backend.execute_sparql.assert_not_called()
+
+    def test_query_engine_expand_entity_uri_enabled(self):
+        engine = QueryEngine()
+        mock_backend = MagicMock()
+        
+        # Mock the backend returning an aligned URI
+        mock_backend.execute_sparql.return_value = {
+            "bindings": [{"aligned": {"value": "http://ex.org/aligned_entity"}}]
+        }
+        
+        result = engine.expand_entity_uri("http://ex.org/original", mock_backend, use_alignments=True)
+        
+        self.assertIn("http://ex.org/original", result)
+        self.assertIn("http://ex.org/aligned_entity", result)
+        self.assertEqual(len(result), 2)
+        mock_backend.execute_sparql.assert_called_once()
+        
+    def test_end_to_end_cross_ontology_uri_flow(self):
+        """
+        Full end-to-end: real expand_entity_uri queries a mock backend,
+        then build_values_clause injects the results into a SPARQL template.
+        """
+        engine = QueryEngine()
+        mock_backend = MagicMock()
+        mock_backend.execute_sparql.return_value = {
+            "bindings": [{"aligned": {"value": "http://aligned.org/2"}}]
+        }
+
+        original_uri = "http://ex.org/1"
+        expanded = engine.expand_entity_uri(original_uri, store_backend=mock_backend, use_alignments=True)
+        values_clause = engine.build_values_clause("subject", expanded)
+
+        sparql_query = f"""
+            SELECT ?instance ?name WHERE {{
+                {values_clause}
+                ?instance a ?subject .
+                ?instance <http://schema.org/name> ?name .
+            }}
+        """
+
+        self.assertIn("http://ex.org/1", sparql_query)
+        self.assertIn("http://aligned.org/2", sparql_query)
+        self.assertIn("VALUES ?subject", sparql_query)
+        mock_backend.execute_sparql.assert_called_once()
