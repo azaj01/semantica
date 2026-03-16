@@ -81,13 +81,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from ..embeddings import EmbeddingGenerator
-from ..embeddings import EmbeddingGenerator
 from ..graph_store import GraphStore
 from ..utils.logging import get_logger
 from .context_graph import ContextGraph
 from .decision_models import Decision, PolicyException
 
-# Optional imports for advanced features
+
 try:
     from ..kg import (
         CentralityCalculator, CommunityDetector, PathFinder, 
@@ -240,12 +239,10 @@ class DecisionQuery:
         """Find precedents using vector store hybrid search."""
         hybrid_search = self.vector_components["hybrid_search"]
         
-        # Build filters
         filters = {}
         if category:
             filters["category"] = category
         
-        # Search vector store
         results = hybrid_search.search(
             query=scenario,
             filters=filters,
@@ -340,8 +337,13 @@ class DecisionQuery:
                     continue
                 
                 # Format to conform to _dict_to_decision
-                decision_data = {"id": node.get("id")}
-                decision_data.update(metadata)
+                core_fields = {
+                    "category", "scenario", "reasoning", "outcome", "confidence", 
+                    "timestamp", "decision_maker", "reasoning_embedding", "node2vec_embedding"
+                }
+                custom_metadata = {k: v for k, v in metadata.items() if k not in core_fields}
+                decision_data = {"id": node.get("id"), "metadata": custom_metadata}
+                decision_data.update({k: v for k, v in metadata.items() if k in core_fields})
                 
                 try:
                     decision = self._dict_to_decision(decision_data)
@@ -427,8 +429,14 @@ class DecisionQuery:
                 for node in nodes:
                     metadata = node.get("metadata", {}).get("properties", node.get("metadata", {}))
                     if metadata.get("category") == category:
-                        decision_data = {"id": node.get("id")}
-                        decision_data.update(metadata)
+                        core_fields = {
+                            "category", "scenario", "reasoning", "outcome", "confidence", 
+                            "timestamp", "decision_maker", "reasoning_embedding", "node2vec_embedding"
+                        }
+                        custom_metadata = {k: v for k, v in metadata.items() if k not in core_fields}
+                        decision_data = {"id": node.get("id"), "metadata": custom_metadata}
+                        decision_data.update({k: v for k, v in metadata.items() if k in core_fields})
+                        
                         try:
                             decisions.append(self._dict_to_decision(decision_data))
                         except KeyError:
@@ -488,8 +496,14 @@ class DecisionQuery:
                     node = self.graph_store.find_node(d_id)
                     if node and node.get("type") == "Decision":
                         metadata = node.get("metadata", {}).get("properties", node.get("metadata", {}))
-                        decision_data = {"id": node.get("id")}
-                        decision_data.update(metadata)
+                        core_fields = {
+                            "category", "scenario", "reasoning", "outcome", "confidence", 
+                            "timestamp", "decision_maker", "reasoning_embedding", "node2vec_embedding"
+                        }
+                        custom_metadata = {k: v for k, v in metadata.items() if k not in core_fields}
+                        decision_data = {"id": node.get("id"), "metadata": custom_metadata}
+                        decision_data.update({k: v for k, v in metadata.items() if k in core_fields})
+                        
                         try:
                             decisions.append(self._dict_to_decision(decision_data))
                         except KeyError:
@@ -567,11 +581,19 @@ class DecisionQuery:
                     
                     # Ensure dt is naive or both are aware
                     if start.tzinfo is not None and dt.tzinfo is None:
-                        pass 
+                        dt = dt.replace(tzinfo=start.tzinfo)
+                    elif start.tzinfo is None and dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
 
                     if start <= dt <= end:
-                        decision_data = {"id": node.get("id")}
-                        decision_data.update(metadata)
+                        core_fields = {
+                            "category", "scenario", "reasoning", "outcome", "confidence", 
+                            "timestamp", "decision_maker", "reasoning_embedding", "node2vec_embedding"
+                        }
+                        custom_metadata = {k: v for k, v in metadata.items() if k not in core_fields}
+                        decision_data = {"id": node.get("id"), "metadata": custom_metadata}
+                        decision_data.update({k: v for k, v in metadata.items() if k in core_fields})
+                        
                         try:
                             decisions.append(self._dict_to_decision(decision_data))
                         except KeyError:
@@ -643,8 +665,14 @@ class DecisionQuery:
                         node = self.graph_store.find_node(current_node_id)
                         if node and node.get("type") == "Decision":
                             metadata = node.get("metadata", {}).get("properties", node.get("metadata", {}))
-                            decision_data = {"id": node.get("id")}
-                            decision_data.update(metadata)
+                            core_fields = {
+                                "category", "scenario", "reasoning", "outcome", "confidence", 
+                                "timestamp", "decision_maker", "reasoning_embedding", "node2vec_embedding"
+                            }
+                            custom_metadata = {k: v for k, v in metadata.items() if k not in core_fields}
+                            decision_data = {"id": node.get("id"), "metadata": custom_metadata}
+                            decision_data.update({k: v for k, v in metadata.items() if k in core_fields})
+                            
                             try:
                                 decision = self._dict_to_decision(decision_data)
                                 decision.metadata["hop_count"] = current_hop
@@ -653,10 +681,18 @@ class DecisionQuery:
                                 pass
                                 
                     if current_hop < max_hops:
-                        # Get all neighbors
-                        neighbors = self.graph_store.get_neighbors(current_node_id)
-                        for neighbor in neighbors:
-                            n_id = neighbor["id"]
+                        # Undirected traversal: Get both incoming and outgoing neighbors
+                        neighbors = []
+                        # Outgoing edges
+                        for edge in self.graph_store._adjacency.get(current_node_id, []):
+                            neighbors.append(edge.target_id)
+                        # Incoming edges
+                        for src_id, edges in self.graph_store._adjacency.items():
+                            for edge in edges:
+                                if edge.target_id == current_node_id:
+                                    neighbors.append(src_id)
+                                    
+                        for n_id in neighbors:
                             if n_id not in visited:
                                 visited.add(n_id)
                                 queue.append((n_id, current_hop + 1))
@@ -829,8 +865,14 @@ class DecisionQuery:
                 exceptions = []
                 for node in nodes:
                     metadata = node.get("metadata", {}).get("properties", node.get("metadata", {}))
-                    exception_data = {"id": node.get("id")}
-                    exception_data.update(metadata)
+                    core_fields = {
+                        "decision_id", "policy_id", "reason", "approver", 
+                        "approval_timestamp", "justification"
+                    }
+                    custom_metadata = {k: v for k, v in metadata.items() if k not in core_fields}
+                    exception_data = {"id": node.get("id"), "metadata": custom_metadata}
+                    exception_data.update({k: v for k, v in metadata.items() if k in core_fields})
+                    
                     try:
                         exception = self._dict_to_exception(exception_data)
                     except KeyError:

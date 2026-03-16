@@ -164,8 +164,8 @@ class DecisionRecorder:
         try:
             if isinstance(self.graph_store, ContextGraph):
                 for entity_id in entities:
-                    self.graph_store.add_node(node_id=entity_id, node_type="Entity", properties={})
-                    self.graph_store.add_edge(source_id=decision_id, target_id=entity_id, edge_type="ABOUT", properties={})
+                    self.graph_store.add_node(node_id=entity_id, node_type="Entity")
+                    self.graph_store.add_edge(source_id=decision_id, target_id=entity_id, edge_type="ABOUT")
                 self.logger.info(f"Linked decision {decision_id} to {len(entities)} entities")
                 return
 
@@ -306,9 +306,9 @@ class DecisionRecorder:
             self._store_exception_node(exception)
             
             if isinstance(self.graph_store, ContextGraph):
-                self.graph_store.add_node(node_id=policy_id, node_type="Policy", properties={})
-                self.graph_store.add_edge(source_id=decision_id, target_id=exception.exception_id, edge_type="GRANTED_EXCEPTION", properties={})
-                self.graph_store.add_edge(source_id=exception.exception_id, target_id=policy_id, edge_type="OVERRIDDEN_POLICY", properties={})
+                self.graph_store.add_node(node_id=policy_id, node_type="Policy")
+                self.graph_store.add_edge(source_id=decision_id, target_id=exception.exception_id, edge_type="GRANTED_EXCEPTION")
+                self.graph_store.add_edge(source_id=exception.exception_id, target_id=policy_id, edge_type="OVERRIDDEN_POLICY")
                 self.logger.info(f"Recorded exception: {exception.exception_id}")
                 return exception.exception_id
 
@@ -443,7 +443,7 @@ class DecisionRecorder:
             
             if isinstance(self.graph_store, ContextGraph):
                 for precedent_id, relationship_type in zip(precedent_ids, relationship_types):
-                    self.graph_store.add_edge(source_id=decision_id, target_id=precedent_id, edge_type=relationship_type, properties={})
+                    self.graph_store.add_edge(source_id=decision_id, target_id=precedent_id, edge_type=relationship_type)
                 self.logger.info(f"Linked {len(precedent_ids)} precedents to decision {decision_id}")
                 return
 
@@ -485,7 +485,7 @@ class DecisionRecorder:
             self.graph_store.add_node(
                 node_id=decision.decision_id,
                 node_type="Decision",
-                properties=metadata
+                **metadata
             )
             return
 
@@ -534,7 +534,7 @@ class DecisionRecorder:
             self.graph_store.add_node(
                 node_id=exception.exception_id,
                 node_type="Exception",
-                properties=metadata
+                **metadata
             )
             return
 

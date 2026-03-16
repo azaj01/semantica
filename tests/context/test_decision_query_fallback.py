@@ -54,10 +54,7 @@ def test_decision_query_contextgraph_fallback(memory_components):
     )
     
     # Test find_by_category
-    print("Graph Stats: ", cg.stats())
-    print("All Nodes: ", cg.find_nodes())
     loans = dq.find_by_category("loan_approval")
-    print("Loans Found: ", loans)
     assert len(loans) == 1
     assert loans[0].decision_id == "dec_1"
     
@@ -73,9 +70,13 @@ def test_decision_query_contextgraph_fallback(memory_components):
     # Add a precedent link for tracing & multihop
     recorder.link_precedents(dec1_id, [dec2_id], ["SIMILAR_SCENARIO"])
     
-    # Test multi_hop_reasoning
-    multi_hop = dq.multi_hop_reasoning(dec1_id, "", max_hops=2)
-    assert len(multi_hop) >= 1  # Should find connected precedents
+    # Test multi_hop_reasoning (Undirected Traversal)
+    multi_hop = dq.multi_hop_reasoning(entity_1, "", max_hops=1)
+    assert any(d.decision_id == "dec_1" for d in multi_hop), "Undirected traversal failed to find Dec 1 from Entity 1"
+    
+    # Verify metadata preservation
+    dec1 = [d for d in multi_hop if d.decision_id == "dec_1"][0]
+    assert dec1.metadata.get("amount") == 5000, f"Custom metadata 'amount' lost: {dec1.metadata}"
     
     # Test trace_decision_path
     paths = dq.trace_decision_path(dec1_id, ["SIMILAR_SCENARIO"])
@@ -92,3 +93,5 @@ def test_decision_query_contextgraph_fallback(memory_components):
     )
     exceptions = dq.find_similar_exceptions("Market downturn", limit=5)
     assert len(exceptions) == 1
+    
+    print("\nALL FALLBACK VERIFICATIONS PASSED")
