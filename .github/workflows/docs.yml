@@ -8,11 +8,12 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
-      - 'semantica/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
       - 'CHANGELOG.md'
       - 'RELEASE.md'
+  release:
+    types: [published]
   workflow_dispatch:
 
 # Permissions needed to deploy to GitHub Pages

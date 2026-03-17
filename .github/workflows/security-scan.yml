@@ -4,9 +4,19 @@ on:
   schedule:
     - cron: '30 1 * * 1,4'  # Mon/Thu 7 AM IST
   push:
-    branches: [ main ]
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'requirements-docs.txt'
+      - '*.md'
   pull_request:
-    branches: [ main ]
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'requirements-docs.txt'
+      - '*.md'
 
 jobs:
   security-scan:
