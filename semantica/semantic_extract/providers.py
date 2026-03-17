@@ -997,7 +997,7 @@ class NovitaProvider(BaseProvider):
         super().__init__(**kwargs)
         self.api_key = api_key or config.get_api_key("novita")
         self.model = model
-        self.base_url = "https://api.novita.ai/openai"
+        self.base_url = "https://api.novita.ai/v1"
         self.client = None
         self._init_client()
 

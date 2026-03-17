@@ -1,84 +1,65 @@
 
 import os
 import sys
-import json
-from pprint import pprint
+import pytest
 
-# Ensure the package is in the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from semantica.semantic_extract.methods import (
-    extract_entities_llm, 
-    extract_relations_llm, 
-    extract_triplets_llm
+    extract_entities_llm,
+    extract_relations_llm,
+    extract_triplets_llm,
 )
 from semantica.semantic_extract.providers import create_provider
-from semantica.utils.exceptions import ProcessingError
+from semantica.semantic_extract.models import Entity
 
-# Set the API key
-# Set the API key from environment
-# We recommend setting it as an environment variable NOVITA_API_KEY
-if not os.environ.get("NOVITA_API_KEY"):
-    print("Warning: NOVITA_API_KEY not set. Test will likely fail.")
+NOVITA_API_KEY = os.environ.get("NOVITA_API_KEY")
+NOVITA_MODEL = "deepseek/deepseek-v3.2"
+TEXT = (
+    "Apple Inc. was founded by Steve Jobs, Steve Wozniak, and Ronald Wayne in 1976. "
+    "It is headquartered in Cupertino, California. The company designs, manufactures, "
+    "and markets smartphones, personal computers, tablets, wearables, and accessories."
+)
 
-def test_NOVITA_all():
-    text = "Apple Inc. was founded by Steve Jobs, Steve Wozniak, and Ronald Wayne in 1976. It is headquartered in Cupertino, California. The company designs, manufactures, and markets smartphones, personal computers, tablets, wearables, and accessories."
-    
-    print("--- Testing NOVITA Provider Availability ---")
-    try:
-        provider = create_provider("NOVITA")
-        available = provider.is_available()
-        print(f"NOVITA Available: {available}")
-        if not available:
-            print("Error: NOVITA is not available. Check library installation or API key.")
-            return
-    except Exception as e:
-        print(f"Error checking provider: {e}")
-        return
+pytestmark = pytest.mark.skipif(
+    not NOVITA_API_KEY,
+    reason="NOVITA_API_KEY not set",
+)
 
-    print("\n--- Testing Entity Extraction ---")
-    try:
-        entities = extract_entities_llm(text, provider="NOVITA", model="deepseek/deepseek-v3.2")
-        print(f"Extracted {len(entities)} entities:")
-        pprint(entities)
-    except Exception as e:
-        print(f"Entity extraction failed: {e}")
 
-    print("\n--- Testing Relation Extraction ---")
-    try:
-        # Use a few entities for relation extraction
-        from semantica.semantic_extract.models import Entity
-        sample_entities = [
-            Entity(name="Apple Inc.", type="ORGANIZATION"),
-            Entity(name="Steve Jobs", type="PERSON")
-        ]
-        relations = extract_relations_llm(text, entities=sample_entities, provider="NOVITA", model="deepseek/deepseek-v3.2")
-        print(f"Extracted {len(relations)} relations:")
-        pprint(relations)
-    except Exception as e:
-        print(f"Relation extraction failed: {e}")
+def test_novita_provider_available():
+    provider = create_provider("novita")
+    assert provider.is_available(), "Novita provider not available — check NOVITA_API_KEY and openai install"
 
-    print("\n--- Testing Triplet Extraction ---")
-    try:
-        triplets = extract_triplets_llm(text, provider="NOVITA", model="deepseek/deepseek-v3.2")
-        print(f"Extracted {len(triplets)} triplets:")
-        pprint(triplets)
-    except Exception as e:
-        print(f"Triplet extraction failed: {e}")
 
-    print("\n--- Testing Auto-Chunking ---")
-    long_text = " ".join([text] * 10) # Roughly 1000-1500 tokens
-    try:
-        entities_chunked = extract_entities_llm(
-            long_text, 
-            provider="NOVITA", 
-            model="deepseek/deepseek-v3.2",
-            max_text_length=200 # Force chunking
-        )
-        print(f"Extracted {len(entities_chunked)} entities from long text (chunked):")
-        # Just show count to avoid clutter
-    except Exception as e:
-        print(f"Chunked extraction failed: {e}")
+def test_novita_entity_extraction():
+    entities = extract_entities_llm(TEXT, provider="novita", model=NOVITA_MODEL)
+    assert isinstance(entities, list), "Expected a list of entities"
+    assert len(entities) > 0, "No entities extracted"
 
-if __name__ == "__main__":
-    test_NOVITA_all()
+
+def test_novita_relation_extraction():
+    sample_entities = [
+        Entity(name="Apple Inc.", type="ORGANIZATION"),
+        Entity(name="Steve Jobs", type="PERSON"),
+    ]
+    relations = extract_relations_llm(TEXT, entities=sample_entities, provider="novita", model=NOVITA_MODEL)
+    assert isinstance(relations, list), "Expected a list of relations"
+
+
+def test_novita_triplet_extraction():
+    triplets = extract_triplets_llm(TEXT, provider="novita", model=NOVITA_MODEL)
+    assert isinstance(triplets, list), "Expected a list of triplets"
+    assert len(triplets) > 0, "No triplets extracted"
+
+
+def test_novita_chunked_extraction():
+    long_text = " ".join([TEXT] * 10)
+    entities = extract_entities_llm(
+        long_text,
+        provider="novita",
+        model=NOVITA_MODEL,
+        max_text_length=200,
+    )
+    assert isinstance(entities, list), "Expected a list of entities from chunked extraction"
+    assert len(entities) > 0, "No entities extracted from chunked text"
