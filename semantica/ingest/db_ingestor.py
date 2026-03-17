@@ -34,10 +34,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-import sqlalchemy
-from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import Engine
-
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
@@ -101,13 +97,13 @@ class DatabaseConnector:
         self.logger = get_logger("database_connector")
         self.db_type = db_type.lower() if db_type else ""
         self.config = config
-        self.engine: Optional[Engine] = None
+        self.engine: Optional[Any] = None
 
         self.logger.debug(
             f"Database connector initialized: db_type={db_type or 'auto-detect'}"
         )
 
-    def connect(self, connection_string: str) -> Engine:
+    def connect(self, connection_string: str) -> Any:
         """
         Establish database connection.
 
@@ -129,6 +125,14 @@ class DatabaseConnector:
             ProcessingError: If connection fails or database type is unsupported
         """
         try:
+            try:
+                from sqlalchemy import create_engine, text
+            except ImportError:
+                raise ProcessingError(
+                    "sqlalchemy is required for database ingestion. "
+                    "Install with: pip install sqlalchemy"
+                )
+
             # Parse connection string to detect database type
             parsed = urlparse(connection_string)
 
@@ -188,6 +192,7 @@ class DatabaseConnector:
             bool: True if connection successful, False otherwise
         """
         try:
+            from sqlalchemy import create_engine, text
             engine = create_engine(connection_string)
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
@@ -226,7 +231,7 @@ class DataExporter:
 
     def export_table_data(
         self,
-        connection: Engine,
+        connection: Any,
         table_name: str,
         schema: Optional[str] = None,
         limit: Optional[int] = None,
@@ -264,6 +269,7 @@ class DataExporter:
             ProcessingError: If table export fails
         """
         try:
+            from sqlalchemy import inspect
             inspector = inspect(connection)
 
             # Get column information
@@ -379,7 +385,7 @@ class DataExporter:
         return transformed
 
     def export_schema(
-        self, connection: Engine, schema: Optional[str] = None
+        self, connection: Any, schema: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Export database schema information.
@@ -406,6 +412,7 @@ class DataExporter:
             ProcessingError: If schema export fails
         """
         try:
+            from sqlalchemy import inspect
             inspector = inspect(connection)
 
             schema_info = {"tables": [], "views": [], "foreign_keys": []}
@@ -591,6 +598,7 @@ class DBIngestor:
                 schema = self.analyze_schema(connection_string)
 
                 # Get all table names
+                from sqlalchemy import inspect
                 inspector = inspect(engine)
                 all_tables = inspector.get_table_names()
 

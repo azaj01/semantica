@@ -951,10 +951,11 @@ class DecisionQuery:
                 
                 for measure_type, measure_data in centrality_measures.items():
                     if isinstance(measure_data, dict) and 'centrality' in measure_data:
-                        decision_measures[measure_type] = measure_data['centrality'].get(decision_id, 0.0)
-                
+                        val = measure_data['centrality'].get(decision_id, 0.0)
+                        decision_measures[measure_type] = val if isinstance(val, (int, float)) else 0.0
+
                 analysis["centrality_measures"] = decision_measures
-                
+
                 # Calculate overall influence score
                 measures = analysis["centrality_measures"]
                 analysis["influence_score"] = (

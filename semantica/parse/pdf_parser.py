@@ -33,9 +33,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import pdfplumber
-from PIL import Image
-
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
@@ -119,6 +116,13 @@ class PDFParser:
                 raise ValidationError(f"File is not a PDF: {file_path}")
 
             try:
+                try:
+                    import pdfplumber
+                except ImportError:
+                    raise ProcessingError(
+                        "pdfplumber is required for PDF parsing. "
+                        "Install with: pip install pdfplumber"
+                    )
                 with pdfplumber.open(str(file_path)) as pdf:
                     # Extract metadata
                     metadata = self._extract_metadata(pdf)

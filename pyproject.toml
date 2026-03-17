@@ -220,3 +220,6 @@ profile = "black"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: marks tests that require external services or API keys (deselect with '-m not integration')",
+]

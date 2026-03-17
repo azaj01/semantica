@@ -32,8 +32,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from pptx import Presentation
-
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
@@ -97,6 +95,13 @@ class PPTXParser:
             raise ValidationError(f"File is not a PPTX: {file_path}")
 
         try:
+            try:
+                from pptx import Presentation
+            except ImportError:
+                raise ProcessingError(
+                    "python-pptx is required for PPTX parsing. "
+                    "Install with: pip install python-pptx"
+                )
             prs = Presentation(str(file_path))
 
             # Extract metadata
@@ -220,7 +225,7 @@ class PPTXParser:
             images=images,
         )
 
-    def _extract_metadata(self, prs: Presentation) -> Dict[str, Any]:
+    def _extract_metadata(self, prs: Any) -> Dict[str, Any]:
         """Extract presentation metadata."""
         metadata = {}
 

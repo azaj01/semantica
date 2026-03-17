@@ -11,7 +11,7 @@ from semantica.semantic_extract.methods import (
     extract_triplets_llm,
 )
 from semantica.semantic_extract.providers import create_provider
-from semantica.semantic_extract.models import Entity
+from semantica.semantic_extract import Entity
 
 NOVITA_API_KEY = os.environ.get("NOVITA_API_KEY")
 NOVITA_MODEL = "deepseek/deepseek-v3.2"
