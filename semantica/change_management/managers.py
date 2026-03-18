@@ -127,7 +127,7 @@ class TemporalVersionManager(BaseVersionManager):
         Create and store snapshot with checksum and metadata.
 
         Args:
-            graph: Knowledge graph dict with "entities" and "relationships"
+            graph: Knowledge graph dict with "nodes"/"edges" (or legacy "entities"/"relationships")
             version_label: Version string (e.g., "v1.0")
             author: Email address of the change author
             description: Change description (max 500 chars)
@@ -140,26 +140,31 @@ class TemporalVersionManager(BaseVersionManager):
             ValidationError: If input validation fails
             ProcessingError: If storage operation fails
         """
-        # Validate inputs
+        from .change_log import ChangeLogEntry
+
         change_entry = ChangeLogEntry(
             timestamp=datetime.now().isoformat(), author=author, description=description
         )
 
-        # Create snapshot
+    
+        nodes_data = graph.get("nodes", graph.get("entities", [])).copy()
+        edges_data = graph.get("edges", graph.get("relationships", [])).copy()
+
+ 
         snapshot = {
             "label": version_label,
             "timestamp": change_entry.timestamp,
             "author": change_entry.author,
             "description": change_entry.description,
-            "entities": graph.get("entities", []).copy(),
-            "relationships": graph.get("relationships", []).copy(),
+            "nodes": nodes_data,
+            "edges": edges_data,
+            "entities": nodes_data,
+            "relationships": edges_data,
             "metadata": options.get("metadata", {}),
         }
 
-        # Compute and add checksum
         snapshot["checksum"] = compute_checksum(snapshot)
 
-        # Store snapshot
         self.storage.save(snapshot)
 
         self.logger.info(f"Created snapshot '{version_label}' by {author}")
