@@ -377,6 +377,93 @@ class TemporalVersionManager(BaseVersionManager):
             "pruned_versions": deleted_labels,
             "retained_count": len(all_versions) - len(deleted_labels)
         }
+    
+    # Git-like audit trails
+
+    def attach_to_graph(self, graph: Any) -> None:
+        """
+        Attach this manager to a ContextGraph to enable mutation tracking.
+        Injects the mutation callback into the graph to capture all node/edge changes.
+        """
+        graph.mutation_callback = self.record_mutation
+        self.logger.info(f"Attached mutation tracking to graph: {getattr(graph, 'graph_id', 'unknown')}")
+
+    def record_mutation(self, operation: str, entity_id: str, payload: Dict[str, Any]) -> None:
+        """
+        Callback triggered by the graph to record granular mutations.
+        """
+        from .change_log import MutationRecord
+        record = MutationRecord(
+            timestamp=datetime.now().isoformat(),
+            operation=operation,
+            entity_id=entity_id,
+            payload=payload
+        )
+        
+        mutation_dict = {
+            "timestamp": record.timestamp,
+            "operation": record.operation,
+            "entity_id": record.entity_id,
+            "payload": record.payload,
+            "version_label": record.version_label
+        }
+        self.storage.save_mutation(mutation_dict)
+        self.logger.debug(f"Recorded mutation: {operation} on {entity_id}")
+
+    def tag_version(self, version_label: str, tag_name: str) -> None:
+        """
+        Create a named tag (e.g., 'v1.0-approved') for a specific version.
+        """
+        if not self.storage.exists(version_label):
+            raise ValidationError(f"Cannot tag non-existent version: '{version_label}'")
+        
+        self.storage.save_tag(tag_name, version_label)
+        self.logger.info(f"Tagged version '{version_label}' as '{tag_name}'")
+
+    def list_tags(self) -> Dict[str, str]:
+        """
+        Return a mapping of all tag names to their version labels.
+        """
+        return self.storage.list_tags()
+
+    def diff(self, version_a: str, version_b: str) -> Dict[str, Any]:
+        """
+        Git-like alias for compare_versions. Computes added/removed/modified entities.
+        """
+        return self.compare_versions(version_a, version_b)
+
+    def get_node_history(self, node_id: str) -> List[Dict[str, Any]]:
+        """
+        Retrieve the complete chronological mutation history for a specific node.
+        """
+        return self.storage.get_entity_history(node_id)
+
+    def restore_snapshot(self, graph: Any, target_version: str, require_confirmation: bool = True) -> bool:
+        """
+        Restore the graph to a specific version snapshot.
+        
+        Args:
+            graph: The ContextGraph instance to restore.
+            target_version: The version label to restore to.
+            require_confirmation: If True, raises ProcessingError to prevent accidental data loss.
+        """
+        if require_confirmation:
+            raise ProcessingError(
+                "Rollback protection active. Explicitly set require_confirmation=False "
+                "to overwrite the current graph state."
+            )
+        
+        snapshot = self.storage.get(target_version)
+        if not snapshot:
+            raise ValidationError(f"Version '{target_version}' not found in storage.")
+
+        self.logger.warning(f"Restoring graph to version '{target_version}' - clearing current state.")
+        
+
+        graph.from_dict(snapshot)
+        
+        self.logger.info(f"Successfully restored graph to version '{target_version}'.")
+        return True
         
         
                         

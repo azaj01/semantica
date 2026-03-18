@@ -9,12 +9,14 @@ Key Features:
     - Email validation for authors
     - Timestamp handling in ISO 8601 format
     - Optional change linking and tracking
+    - Granular MutationRecord for per-entity audit trails
 
 Main Classes:
     - ChangeLogEntry: Standard metadata for version changes
+    - MutationRecord: Granular log of node/edge level changes
 
 Example Usage:
-    >>> from semantica.common.change_log import ChangeLogEntry
+    >>> from semantica.change_management.change_log import ChangeLogEntry
     >>> entry = ChangeLogEntry(
     ...     timestamp="2024-01-15T10:30:00Z",
     ...     author="alice@company.com",
@@ -28,7 +30,7 @@ License: MIT
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from ..utils.exceptions import ValidationError
 
@@ -106,3 +108,22 @@ class ChangeLogEntry:
             change_id=change_id,
             related_changes=related_changes or []
         )
+
+
+@dataclass
+class MutationRecord:
+    """
+    Granular record of a single change to a graph entity (node or edge).
+    
+    Attributes:
+        timestamp: ISO 8601 timestamp of the mutation
+        operation: 'ADD_NODE', 'UPDATE_NODE', 'REMOVE_NODE', 'ADD_EDGE', 'UPDATE_EDGE', 'REMOVE_EDGE'
+        entity_id: The ID of the affected node or edge
+        payload: The state of the entity after the mutation
+        version_label: Optional association with a specific saved snapshot version
+    """
+    timestamp: str
+    operation: str
+    entity_id: str
+    payload: Dict[str, Any]
+    version_label: Optional[str] = None

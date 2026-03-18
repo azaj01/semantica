@@ -299,6 +299,8 @@ class ContextGraph:
         self.kg_components = {}
         self._analytics_cache = {}
         
+        self.mutation_callback = self.config.get("mutation_callback", None)
+        
         enable_advanced = self.config.get("advanced_analytics", True)
         
         if KG_AVAILABLE and enable_advanced:
@@ -452,6 +454,10 @@ class ContextGraph:
             return
         node.properties.update(attributes)
         node.metadata.update(attributes)
+
+
+        if getattr(self, "mutation_callback", None):
+            self.mutation_callback("UPDATE_NODE", node_id, node.to_dict())
 
     def get_edge_data(self, source_id: str, target_id: str) -> Dict[str, Any]:
         for edge in self._adjacency.get(source_id, []):
@@ -978,17 +984,20 @@ class ContextGraph:
     def _add_internal_node(self, node: ContextNode) -> bool:
         """Internal method to add a node."""
         self.nodes[node.node_id] = node
-        # Handle edge case where node_type might be None or not a string
+
         if hasattr(node, 'node_type') and isinstance(node.node_type, str):
             self.node_type_index[node.node_type].add(node.node_id)
         else:
-            # Use 'unknown' as fallback for invalid node_type
             self.node_type_index['unknown'].add(node.node_id)
-        return True
 
+        if getattr(self, "mutation_callback", None):
+            self.mutation_callback("ADD_NODE", node.node_id, node.to_dict())
+
+        return True
+    
     def _add_internal_edge(self, edge: ContextEdge) -> bool:
         """Internal method to add an edge."""
-        # Ensure nodes exist
+
         if edge.source_id not in self.nodes:
             self._add_internal_node(
                 ContextNode(edge.source_id, "entity", edge.source_id)
@@ -1001,6 +1010,11 @@ class ContextGraph:
         self.edges.append(edge)
         self.edge_type_index[edge.edge_type].append(edge)
         self._adjacency[edge.source_id].append(edge)
+
+        if getattr(self, "mutation_callback", None):
+            edge_id = f"{edge.source_id}|{edge.edge_type}|{edge.target_id}"
+            self.mutation_callback("ADD_EDGE", edge_id, edge.to_dict())
+
         return True
 
     # --- Builder Methods (Legacy/Utility) ---
