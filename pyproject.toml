@@ -173,6 +173,9 @@ gpu = [
   "cupy>=10.0.0"
 ]
 
+# ---- Agentic Framework Integrations ----
+agno = ["agno>=1.0.0"]
+
 # ---- Splitting / Chunking ----
 split-tiktoken = ["tiktoken>=0.5.0"]
 split-community = ["python-louvain>=0.16"]
@@ -198,7 +201,7 @@ dev = [
 
 # ---- Everything ----
 all = [
-  "semantica[dev,viz,gpu,infra,cloud,monitoring,llm-all,models-huggingface,split-all,graph-all,vectorstore-all,parse-docling]"
+  "semantica[dev,viz,gpu,infra,cloud,monitoring,llm-all,models-huggingface,split-all,graph-all,vectorstore-all,parse-docling,agno]"
 ]
 
 # ---------------- ENTRYPOINTS ----------------
@@ -210,7 +213,7 @@ semantica-worker = "semantica.worker:main"
 # ---------------- TOOLING ----------------
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["semantica*"]
+include = ["semantica*", "integrations*"]
 
 [tool.black]
 line-length = 88

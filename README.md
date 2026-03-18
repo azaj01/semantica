@@ -682,8 +682,9 @@ ontology = importer.load("context.jsonld")
 - 100+ models via LiteLLM — OpenAI, Anthropic, Cohere, Mistral, Ollama, Azure, AWS Bedrock, and more
 - Novita AI — OpenAI-compatible provider (`deepseek/deepseek-v3.2` and more); configure via `NOVITA_API_KEY`
 
-**AI Frameworks**
+**Agentic Frameworks**
 - Complements LangChain, LlamaIndex, AutoGen, CrewAI, Google ADK
+- **Agno** — first-class integration (`pip install semantica[agno]`); five components: `AgnoContextStore` (graph-backed agent memory), `AgnoKnowledgeGraph` (multi-hop GraphRAG knowledge base), `AgnoDecisionKit` (6 decision-intelligence tools), `AgnoKGToolkit` (7 KG tools), `AgnoSharedContext` (shared context graph for multi-agent teams)
 
 **Export**
 - RDF: Turtle, JSON-LD, N-Triples, XML · Parquet · ArangoDB AQL

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agno Agentic Framework Integration** (Issue #249):
+  - Added `AgnoContextStore` — graph-backed agent memory implementing the `agno.memory.db.base.MemoryDb` protocol; wraps `AgentContext` + `VectorStore`; supports `create()`, `table_exists()`, `memory_exists()`, `read_memories()`, `upsert_memory()`, `delete_memory()`, `drop_table()`, `clear()` plus extended `record_decision()`, `find_precedents()`, `retrieve()` methods
+  - Added `AgnoKnowledgeGraph` — multi-hop GraphRAG knowledge base implementing `agno.knowledge.base.AgentKnowledge`; ingests files, directories, URLs, and raw text via NER → relation extraction → graph build → vector index pipeline; `search()` returns `AgnoDocument` objects; `get_graph_context(entity)` returns text summary of entity's graph neighbourhood
+  - Added `AgnoDecisionKit` — Agno `Toolkit` subclass exposing 6 decision-intelligence tools: `record_decision`, `find_precedents`, `trace_causal_chain`, `analyze_impact`, `check_policy`, `get_decision_summary`
+  - Added `AgnoKGToolkit` — Agno `Toolkit` subclass exposing 7 KG pipeline tools: `extract_entities`, `extract_relations`, `add_to_graph`, `query_graph`, `find_related`, `infer_facts`, `export_subgraph`
+  - Added `AgnoSharedContext` — team-level coordinator with a single shared `ContextGraph`; `bind_agent(role)` returns a role-scoped `_AgentScopedStore` with cross-agent memory visibility; thread-safe via `RLock`
+  - All 5 components degrade gracefully when `agno` is not installed (`AGNO_AVAILABLE` flag); importable and functional without agno present
+  - Added `agno = ["agno>=1.0.0"]` optional dependency in `pyproject.toml`; included in `all` extra
+  - 110 integration tests in `tests/integrations/agno/` covering all public APIs, MemoryDb protocol compliance, GraphRAG search, tool registration, shared memory isolation, and thread-safety
+  - 3 cookbook notebooks in `cookbook/integrations/`: `agno_decision_intelligence.ipynb` (loan underwriting), `agno_graphrag_context.ipynb` (regulatory compliance), `agno_multi_agent_shared_context.ipynb` (multi-agent team coordination)
+  - Full reference documentation in `docs/integrations/agno.md`
+
 - **Novita AI Provider** (PR #374 by @Alex-wuhu):
   - Added `NovitaProvider` — OpenAI-compatible integration via `https://api.novita.ai/v1`; supports `generate()` and `generate_structured()` (JSON forced format)
   - Default model: `deepseek/deepseek-v3.2`; configurable via `NOVITA_API_KEY` environment variable
