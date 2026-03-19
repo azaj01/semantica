@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **ContextGraph Thread Safety & Pagination** (PR #385, Issues #378 #376 by @ZohaibHassan16, review & fixes by @KaifAhmad1):
+  - `ContextGraph`: added `threading.RLock` (`self._lock`) to `__init__`; all mutation paths (`add_nodes`, `add_edges`, `add_node`, `add_edge`, `save_to_file`, `load_from_file`, `link_graph`) and all read/query paths (`find_nodes`, `find_edges`, `find_node`, `find_active_nodes`, `get_neighbors`, `query`, `stats`, `density`) now protected with `with self._lock:` to prevent race-condition corruption under concurrent FastAPI workers
+  - `find_nodes` and `find_edges` gained native `skip`/`limit` pagination parameters so the explorer layer never loads the full collection into memory to slice it
+  - `GraphSession` (`session.py`): introduced session-level `RLock` wrapping all graph access; all 8 lazy analytics properties (`centrality`, `community`, `connectivity`, `path_finder`, `node_embedder`, `similarity`, `link_predictor`, `validator`) initialised under the lock (thread-safe double-checked); `get_nodes()` and `get_edges()` delegate pagination to the graph layer when no in-memory filter is needed
+  - `pyproject.toml`: removed duplicate entry and added missing comma in the `all` optional-dependency array that caused `ERROR Failed to parse pyproject.toml: Unclosed array` in CI
+  - **Fixes applied post-review (by @KaifAhmad1)**:
+    - Fixed `/api/graph/search` returning empty `content` and `properties` — `ContextGraph.query()` wraps results in `node.to_dict()` which uses a `"properties"` envelope, but `_node_dict_to_response` expected a flat `{id, type, content, metadata}` shape; `session.search()` now normalises the envelope before returning
+    - Fixed edge metadata silently dropped on import — `add_edges()` read only from the `"properties"` key, but edges produced by `find_edges()` and `build_graph_dict()` use `"metadata"`; fixed with `edge.get("properties") or edge.get("metadata", {})` fallback
+    - Fixed `POST /api/enrich/links` blocking the asyncio event loop — the O(n) `score_link` scoring loop ran inline in the `async` handler; wrapped in `asyncio.to_thread(_score_all)`
+    - Removed merge-artifact dead code in `session.py`: duplicate `self.annotations` assignment, duplicate un-locked property set, and double-query logic in `get_nodes()`/`get_edges()` that recomputed results outside the lock and threw away the correctly-paginated result computed inside it
+    - Removed merge-artifact dead code in `enrich.py`: unreachable second `predict_links` implementation block after early `return`, and duplicate `nodes, _` fetch in `detect_duplicates`
+
 - **Knowledge Explorer API Backend** (PR #384, Issue #377 by @ZohaibHassan16, review & fixes by @KaifAhmad1):
   - Added `semantica.explorer` package — a full FastAPI backend for the Semantica Knowledge Explorer dashboard
   - `app.py`: `create_app(session)` factory with CORS middleware, custom exception handlers (`KeyError→404`, `ValueError→422`), and HTML5 static-file fallback routing; generic `Exception` handler correctly re-raises `HTTPException` so dependency-injection 503s are not swallowed
