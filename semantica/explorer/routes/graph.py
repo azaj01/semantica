@@ -138,13 +138,17 @@ async def find_path(
     if pf is None:
         raise ValueError("PathFinder not available — KG extras may not be installed.")
 
-    graph_data = await asyncio.to_thread(_build_graph_dict, session)
+    graph_data = await asyncio.to_thread(session.build_graph_dict)
 
-    result = await asyncio.to_thread(
-        pf.find_shortest_path, graph_data, node_id, target
-    )
+    # Select algorithm: dijkstra for weighted shortest path, bfs otherwise.
+    if algorithm.lower() == "dijkstra":
+        path_fn = pf.dijkstra_shortest_path
+    else:
+        path_fn = pf.bfs_shortest_path
 
-    path_nodes = result.get("path", []) if isinstance(result, dict) else []
+    result = await asyncio.to_thread(path_fn, graph_data, node_id, target)
+
+    path_nodes = result.get("path", []) if isinstance(result, dict) else (result or [])
     total_weight = result.get("total_weight", 0.0) if isinstance(result, dict) else 0.0
 
     return PathResponse(
@@ -185,27 +189,3 @@ async def graph_stats(
 
 
 
-def _build_graph_dict(session: GraphSession) -> dict:
-    """Build a graph dict for analytics helpers (entities + relationships)."""
-    nodes, _ = session.get_nodes(skip=0, limit=999_999)
-    edges, _ = session.get_edges(skip=0, limit=999_999)
-    return {
-        "entities": [
-            {
-                "id": n.get("id"),
-                "type": n.get("type", "entity"),
-                "text": n.get("content", n.get("id", "")),
-                "metadata": n.get("metadata", {}),
-            }
-            for n in nodes
-        ],
-        "relationships": [
-            {
-                "source": e.get("source"),
-                "target": e.get("target"),
-                "type": e.get("type", "related_to"),
-                "metadata": e.get("metadata", {}),
-            }
-            for e in edges
-        ],
-    }

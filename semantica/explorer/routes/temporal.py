@@ -121,5 +121,10 @@ async def temporal_patterns(
         if isinstance(patterns, dict):
             patterns = patterns.get("patterns", [])
         return TemporalPatternResponse(patterns=patterns if isinstance(patterns, list) else [])
-    except Exception:
+    except ImportError:
+        # TemporalPatternDetector is an optional KG extra; return empty gracefully.
+        return TemporalPatternResponse(patterns=[])
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("temporal_patterns failed: %s", exc, exc_info=True)
         return TemporalPatternResponse(patterns=[])

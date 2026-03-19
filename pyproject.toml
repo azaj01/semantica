@@ -213,7 +213,7 @@ explorer-lite = [
 
 # Everything
 all = [
-  "semantica[dev,viz,gpu,infra,cloud,monitoring,llm-all,models-huggingface,split-all,graph-all,vectorstore-all,parse-docling,explorer]"
+  "semantica[dev,viz,gpu,infra,cloud,monitoring,llm-all,models-huggingface,split-all,graph-all,vectorstore-all,parse-docling,explorer]",
   "semantica[dev,viz,gpu,infra,cloud,monitoring,llm-all,models-huggingface,split-all,graph-all,vectorstore-all,parse-docling,agno]"
 ]
 

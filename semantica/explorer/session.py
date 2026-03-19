@@ -36,16 +36,15 @@ class GraphSession:
 
     Thread safety: all mutations to the graph or the annotations store
     must go through methods on this class, which are protected by an
-    ``RLock``.
+    ``RLock``.  Lazy analytics properties are also initialised under the
+    same lock to prevent double-instantiation under concurrent requests.
     """
 
     def __init__(self, graph: ContextGraph) -> None:
         self.graph = graph
         self._lock = threading.RLock()
 
-
         self.annotations: Dict[str, Dict[str, Any]] = {}
-
 
         self._centrality: Any = None
         self._community: Any = None
@@ -56,7 +55,6 @@ class GraphSession:
         self._link_predictor: Any = None
         self._validator: Any = None
 
-
     @classmethod
     def from_file(cls, path: str) -> "GraphSession":
         """Load a ContextGraph from a JSON file and wrap it in a session."""
@@ -64,55 +62,69 @@ class GraphSession:
         graph.load_from_file(path)
         return cls(graph)
 
+    # ------------------------------------------------------------------
+    # Lazy analytics properties (thread-safe double-checked locking)
+    # ------------------------------------------------------------------
 
     @property
     def centrality(self) -> Any:
-        if self._centrality is None and _KG_AVAILABLE:
-            self._centrality = CentralityCalculator()
-        return self._centrality
+        with self._lock:
+            if self._centrality is None and _KG_AVAILABLE:
+                self._centrality = CentralityCalculator()
+            return self._centrality
 
     @property
     def community(self) -> Any:
-        if self._community is None and _KG_AVAILABLE:
-            self._community = CommunityDetector()
-        return self._community
+        with self._lock:
+            if self._community is None and _KG_AVAILABLE:
+                self._community = CommunityDetector()
+            return self._community
 
     @property
     def connectivity(self) -> Any:
-        if self._connectivity is None and _KG_AVAILABLE:
-            self._connectivity = ConnectivityAnalyzer()
-        return self._connectivity
+        with self._lock:
+            if self._connectivity is None and _KG_AVAILABLE:
+                self._connectivity = ConnectivityAnalyzer()
+            return self._connectivity
 
     @property
     def path_finder(self) -> Any:
-        if self._path_finder is None and _KG_AVAILABLE:
-            self._path_finder = PathFinder()
-        return self._path_finder
+        with self._lock:
+            if self._path_finder is None and _KG_AVAILABLE:
+                self._path_finder = PathFinder()
+            return self._path_finder
 
     @property
     def node_embedder(self) -> Any:
-        if self._node_embedder is None and _KG_AVAILABLE:
-            self._node_embedder = NodeEmbedder()
-        return self._node_embedder
+        with self._lock:
+            if self._node_embedder is None and _KG_AVAILABLE:
+                self._node_embedder = NodeEmbedder()
+            return self._node_embedder
 
     @property
     def similarity(self) -> Any:
-        if self._similarity is None and _KG_AVAILABLE:
-            self._similarity = SimilarityCalculator()
-        return self._similarity
+        with self._lock:
+            if self._similarity is None and _KG_AVAILABLE:
+                self._similarity = SimilarityCalculator()
+            return self._similarity
 
     @property
     def link_predictor(self) -> Any:
-        if self._link_predictor is None and _KG_AVAILABLE:
-            self._link_predictor = LinkPredictor()
-        return self._link_predictor
+        with self._lock:
+            if self._link_predictor is None and _KG_AVAILABLE:
+                self._link_predictor = LinkPredictor()
+            return self._link_predictor
 
     @property
     def validator(self) -> Any:
-        if self._validator is None and _KG_AVAILABLE:
-            self._validator = GraphValidator()
-        return self._validator
+        with self._lock:
+            if self._validator is None and _KG_AVAILABLE:
+                self._validator = GraphValidator()
+            return self._validator
 
+    # ------------------------------------------------------------------
+    # Graph read helpers
+    # ------------------------------------------------------------------
 
     def get_node(self, node_id: str) -> Optional[Dict[str, Any]]:
         """Get a single node by ID, or ``None``."""
@@ -187,9 +199,12 @@ class GraphSession:
         with self._lock:
             return self.graph.find_active_nodes(node_type=node_type, at_time=at_time)
 
+    # ------------------------------------------------------------------
+    # Annotation CRUD
+    # ------------------------------------------------------------------
 
     def add_annotation(self, annotation: Dict[str, Any]) -> str:
-        """Add an annotation and return its ID."""
+        """Add an annotation (mutates the dict in-place) and return its ID."""
         ann_id = str(uuid.uuid4())
         annotation["annotation_id"] = ann_id
         annotation["created_at"] = datetime.utcnow().isoformat()
@@ -209,6 +224,51 @@ class GraphSession:
         """Delete an annotation. Returns True if found and deleted."""
         with self._lock:
             return self.annotations.pop(annotation_id, None) is not None
+
+    def build_graph_dict(self, node_ids: Optional[list] = None) -> dict:
+        """
+        Build the ``{entities, relationships}`` dict consumed by KG analytics
+        helpers, exporters, and path-finders.
+
+        Args:
+            node_ids: Optional list of node IDs to include.  When given, only
+                      nodes in the list and edges between them are returned.
+        """
+        nodes, _ = self.get_nodes(skip=0, limit=999_999)
+        edges, _ = self.get_edges(skip=0, limit=999_999)
+
+        if node_ids:
+            id_set = set(node_ids)
+            nodes = [n for n in nodes if n.get("id") in id_set]
+            edges = [
+                e for e in edges
+                if e.get("source") in id_set and e.get("target") in id_set
+            ]
+
+        return {
+            "entities": [
+                {
+                    "id": n.get("id"),
+                    "type": n.get("type", "entity"),
+                    "text": n.get("content", n.get("id", "")),
+                    "metadata": n.get("metadata", {}),
+                }
+                for n in nodes
+            ],
+            "relationships": [
+                {
+                    "source": e.get("source"),
+                    "target": e.get("target"),
+                    "type": e.get("type", "related_to"),
+                    "metadata": e.get("metadata", {}),
+                }
+                for e in edges
+            ],
+        }
+
+    # ------------------------------------------------------------------
+    # Graph mutation helpers
+    # ------------------------------------------------------------------
 
     def add_nodes(self, nodes: List[Dict[str, Any]]) -> int:
         """Thread-safe node addition."""

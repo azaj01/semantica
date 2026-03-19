@@ -3,8 +3,8 @@ Export & import routes.
 """
 
 import asyncio
-import io
 import json
+import os
 import tempfile
 from typing import Optional
 
@@ -35,39 +35,6 @@ _FORMAT_MAP = {
 }
 
 
-def _build_kg_dict(session: GraphSession, node_ids: Optional[list] = None) -> dict:
-    """Build the knowledge-graph dict that exporters expect."""
-    nodes, _ = session.get_nodes(skip=0, limit=999_999)
-    edges, _ = session.get_edges(skip=0, limit=999_999)
-
-    if node_ids:
-        id_set = set(node_ids)
-        nodes = [n for n in nodes if n.get("id") in id_set]
-        edges = [
-            e for e in edges
-            if e.get("source") in id_set and e.get("target") in id_set
-        ]
-
-    return {
-        "entities": [
-            {
-                "id": n.get("id"),
-                "type": n.get("type", "entity"),
-                "text": n.get("content", n.get("id", "")),
-                "metadata": n.get("metadata", {}),
-            }
-            for n in nodes
-        ],
-        "relationships": [
-            {
-                "source": e.get("source"),
-                "target": e.get("target"),
-                "type": e.get("type", "related_to"),
-                "metadata": e.get("metadata", {}),
-            }
-            for e in edges
-        ],
-    }
 
 
 @router.post("/api/export")
@@ -84,8 +51,7 @@ async def export_graph(
 
     func_name, content_type, ext = _FORMAT_MAP[fmt]
 
-    kg = await asyncio.to_thread(_build_kg_dict, session, body.node_ids)
-
+    kg = await asyncio.to_thread(session.build_graph_dict, body.node_ids)
 
     try:
         from ...export.methods import (
@@ -106,20 +72,21 @@ async def export_graph(
         if export_fn is None:
             raise ValueError(f"Export function {func_name} not found.")
 
-        # Write to a temp file, read back content.
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="w") as tmp:
-            tmp_path = tmp.name
+        # Write to a temp file; always clean up even if export or read fails.
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False, mode="w") as tmp:
+                tmp_path = tmp.name
 
-        await asyncio.to_thread(export_fn, kg, tmp_path)
+            await asyncio.to_thread(export_fn, kg, tmp_path)
 
-        with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
-            content = fh.read()
-
-        import os
-        os.unlink(tmp_path)
+            with open(tmp_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
     except ImportError:
-  
         content = json.dumps(kg, indent=2, default=str)
         content_type = "application/json"
         ext = ".json"

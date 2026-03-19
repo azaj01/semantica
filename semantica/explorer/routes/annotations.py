@@ -38,21 +38,9 @@ async def create_annotation(
         raise KeyError(body.node_id)
 
     ann_data = body.model_dump()
-    ann_id = await asyncio.to_thread(session.add_annotation, ann_data)
-
-
-    anns = await asyncio.to_thread(session.get_annotations)
-    for a in anns:
-        if a.get("annotation_id") == ann_id:
-            return AnnotationResponse(**a)
-
-    return AnnotationResponse(
-        annotation_id=ann_id,
-        node_id=body.node_id,
-        content=body.content,
-        tags=body.tags,
-        visibility=body.visibility,
-    )
+    # add_annotation mutates ann_data in-place, adding annotation_id and created_at.
+    await asyncio.to_thread(session.add_annotation, ann_data)
+    return AnnotationResponse(**ann_data)
 
 
 @router.delete("/{annotation_id}", status_code=204)

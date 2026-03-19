@@ -65,29 +65,43 @@ async def predict_links(
     if node is None:
         raise KeyError(body.node_id)
 
-    # Build graph dict
+    # Get all nodes and edges to build candidate pairs manually,
+    # because ContextGraph.nodes is a dict (not callable) and is incompatible
+    # with LinkPredictor._get_all_nodes which requires nodes() or get_all_nodes().
     nodes, _ = await asyncio.to_thread(session.get_nodes, skip=0, limit=999_999)
     edges, _ = await asyncio.to_thread(session.get_edges, skip=0, limit=999_999)
-    graph_dict = {
-        "entities": [{"id": n.get("id"), "type": n.get("type", "entity")} for n in nodes],
-        "relationships": [
-            {"source": e.get("source"), "target": e.get("target"),
-             "type": e.get("type", "related_to")}
-            for e in edges
-        ],
+
+    # Pre-compute already-connected node IDs so we skip them.
+    # (LinkPredictor._edge_exists returns False for ContextGraph since it has no
+    # has_edge/get_edge method, so we handle exclusion here instead.)
+    existing_neighbours = {
+        e.get("target") for e in edges if e.get("source") == body.node_id
+    } | {
+        e.get("source") for e in edges if e.get("target") == body.node_id
     }
 
-    try:
-        predictions = await asyncio.to_thread(
-            predictor.predict_links, graph_dict, body.node_id, top_n=body.top_n
-        )
-        pred_list = predictions if isinstance(predictions, list) else []
-        return LinkPredictionResponse(
-            node_id=body.node_id,
-            predictions=[_safe_dict(p) for p in pred_list],
-        )
-    except Exception as exc:
-        raise ValueError(f"Link prediction failed: {exc}")
+    # Score each candidate via score_link (which works with ContextGraph because
+    # it falls back to has_node / get_neighbors).
+    scored = []
+    for n in nodes:
+        candidate = n.get("id")
+        if not candidate or candidate == body.node_id or candidate in existing_neighbours:
+            continue
+        try:
+            score = predictor.score_link(session.graph, body.node_id, candidate)
+            if score > 0:
+                scored.append(
+                    {"target": candidate, "score": score, "type": n.get("type", "entity")}
+                )
+        except Exception:
+            continue
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    return LinkPredictionResponse(
+        node_id=body.node_id,
+        predictions=scored[: body.top_n],
+    )
 
 
 @router.post("/api/enrich/dedup", response_model=DedupResponse)
@@ -100,11 +114,16 @@ async def detect_duplicates(
         from ...deduplication import DuplicateDetector
 
         detector = DuplicateDetector()
-        nodes, _ = session.get_nodes(skip=0, limit=999_999)
+        # Use asyncio.to_thread — get_nodes acquires an RLock and must not block
+        # the event loop.
+        nodes, _ = await asyncio.to_thread(session.get_nodes, skip=0, limit=999_999)
 
         entities = [
-            {"id": n.get("id"), "text": n.get("content", n.get("id", "")),
-             "type": n.get("type", "entity")}
+            {
+                "id": n.get("id"),
+                "text": n.get("content", n.get("id", "")),
+                "type": n.get("type", "entity"),
+            }
             for n in nodes
         ]
 
@@ -144,7 +163,6 @@ async def run_reasoning(
         raise ValueError("Reasoning module not available.")
     except Exception as exc:
         raise ValueError(f"Reasoning failed: {exc}")
-
 
 
 def _safe_dict(obj) -> dict:
