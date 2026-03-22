@@ -41,6 +41,8 @@ def test_version_tagging_and_retrieval(setup_env):
     tags = manager.list_tags()
     assert "production-ready" in tags
     assert tags["production-ready"] == "v1.0"
+    history = manager.get_node_history("node_1")
+    assert history[0]["version_label"] == "v1.0"
 
 def test_tagging_nonexistent_version_fails(setup_env):
     _, manager = setup_env
@@ -65,3 +67,22 @@ def test_rollback_protection_enforcement(setup_env):
     success = manager.restore_snapshot(graph, "v1.0", require_confirmation=False)
     assert success is True
     assert len(graph.nodes) == 1
+
+def test_restore_snapshot_does_not_record_replay_mutations(setup_env):
+    graph, manager = setup_env
+    graph.add_node("node_1", "concept")
+    manager.create_snapshot(
+        graph.to_dict(),
+        version_label="v1.0",
+        author="test@example.com",
+        description="Initial snapshot",
+    )
+    graph.add_node_attribute("node_1", {"status": "changed"})
+
+    history_before_restore = manager.get_node_history("node_1")
+    assert len(history_before_restore) == 2
+
+    manager.restore_snapshot(graph, "v1.0", require_confirmation=False)
+
+    history_after_restore = manager.get_node_history("node_1")
+    assert len(history_after_restore) == 2

@@ -40,6 +40,19 @@ from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 
 
+def _snapshot_collections(snapshot: Dict[str, Any]) -> tuple[List[Any], List[Any]]:
+    """Normalize snapshot collections for compatibility-aware reads."""
+    entities = snapshot.get("entities")
+    if entities is None:
+        entities = snapshot.get("nodes", [])
+
+    relationships = snapshot.get("relationships")
+    if relationships is None:
+        relationships = snapshot.get("edges", [])
+
+    return list(entities or []), list(relationships or [])
+
+
 
 def create_graph_snapshot_record(
     version_id: str,
@@ -132,6 +145,11 @@ class VersionStorage(ABC):
         """Retrieve the chronological mutation history for a specific entity."""
         pass
 
+    @abstractmethod
+    def assign_version_to_unlabeled_mutations(self, version_label: str) -> None:
+        """Attach a version label to unlabeled mutations recorded since the last snapshot."""
+        pass
+
 
 class InMemoryVersionStorage(VersionStorage):
     """
@@ -178,6 +196,7 @@ class InMemoryVersionStorage(VersionStorage):
             # Return metadata only (without full graph data)
             metadata_list = []
             for label, snapshot in self._storage.items():
+                entities, relationships = _snapshot_collections(snapshot)
                 metadata = {
                     "label": snapshot.get("label"),
                     "version_id": snapshot.get("version_id", snapshot.get("label")),
@@ -186,8 +205,8 @@ class InMemoryVersionStorage(VersionStorage):
                     "author": snapshot.get("author"),
                     "description": snapshot.get("description"),
                     "checksum": snapshot.get("checksum"),
-                    "entity_count": len(snapshot.get("entities", [])),
-                    "relationship_count": len(snapshot.get("relationships", [])),
+                    "entity_count": len(entities),
+                    "relationship_count": len(relationships),
                     }
                 metadata_list.append(metadata)
             return metadata_list
@@ -225,6 +244,12 @@ class InMemoryVersionStorage(VersionStorage):
     def get_entity_history(self, entity_id: str) -> List[Dict[str, Any]]:
         with self._lock:
             return [m for m in self._mutations if m.get("entity_id") == entity_id]
+
+    def assign_version_to_unlabeled_mutations(self, version_label: str) -> None:
+        with self._lock:
+            for mutation in self._mutations:
+                if mutation.get("version_label") is None:
+                    mutation["version_label"] = version_label
 
 
 class SQLiteVersionStorage(VersionStorage):
@@ -370,6 +395,7 @@ class SQLiteVersionStorage(VersionStorage):
                 metadata_list = []
                 for row in cursor.fetchall():
                     snapshot = json.loads(row[0])
+                    entities, relationships = _snapshot_collections(snapshot)
 
                     metadata = {
                         "label": snapshot.get("label"),
@@ -379,8 +405,8 @@ class SQLiteVersionStorage(VersionStorage):
                         "author": snapshot.get("author"),
                         "description": snapshot.get("description"),
                         "checksum": snapshot.get("checksum"),
-                        "entity_count": len(snapshot.get("entities", [])),
-                        "relationship_count": len(snapshot.get("relationships", [])),
+                        "entity_count": len(entities),
+                        "relationship_count": len(relationships),
                     }
                     metadata_list.append(metadata)
 
@@ -518,6 +544,27 @@ class SQLiteVersionStorage(VersionStorage):
                 return history
             except sqlite3.Error as e:
                 raise ProcessingError(f"Failed to get entity history: {e}")
+            finally:
+                conn.close()
+
+    def assign_version_to_unlabeled_mutations(self, version_label: str) -> None:
+        with self._lock:
+            conn = sqlite3.connect(str(self.storage_path))
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE mutation_log
+                    SET version_label = ?
+                    WHERE version_label IS NULL
+                    """,
+                    (version_label,),
+                )
+                conn.commit()
+            except sqlite3.Error as e:
+                raise ProcessingError(
+                    f"Failed to assign version label to mutations: {e}"
+                )
             finally:
                 conn.close()
 

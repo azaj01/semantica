@@ -114,6 +114,7 @@ class TemporalVersionManager(BaseVersionManager):
         """
         super().__init__(storage_path)
         self.config = config
+        self._attached_graphs: List[Any] = []
 
     def create_snapshot(
         self,
@@ -127,7 +128,8 @@ class TemporalVersionManager(BaseVersionManager):
         Create and store snapshot with checksum and metadata.
 
         Args:
-            graph: Knowledge graph dict with "entities" and "relationships"
+            graph: Knowledge graph dict with "nodes"/"edges" or
+                legacy "entities"/"relationships"
             version_label: Version string (e.g., "v1.0")
             author: Email address of the change author
             description: Change description (max 500 chars)
@@ -140,33 +142,20 @@ class TemporalVersionManager(BaseVersionManager):
             ValidationError: If input validation fails
             ProcessingError: If storage operation fails
         """
-        from .change_log import ChangeLogEntry
-        from ..utils.exceptions import ValidationError
-
         change_entry = ChangeLogEntry(
             timestamp=datetime.now().isoformat(), author=author, description=description
         )
+        entities, relationships = self._extract_graph_collections(graph)
 
-
-        valid_keys = {"nodes", "edges", "entities", "relationships"}
-        if not any(key in graph for key in valid_keys):
-            raise ValidationError(
-                "Graph dictionary is missing required schema keys. "
-                "Must contain 'nodes'/'edges' or 'entities'/'relationships'."
-            )
-
-
-        nodes_data = graph.get("nodes") or graph.get("entities") or []
-        edges_data = graph.get("edges") or graph.get("relationships") or []
-
-    
         snapshot = {
             "label": version_label,
             "timestamp": change_entry.timestamp,
             "author": change_entry.author,
             "description": change_entry.description,
-            "nodes": nodes_data.copy() if nodes_data else [],
-            "edges": edges_data.copy() if edges_data else [],
+            "nodes": entities.copy(),
+            "edges": relationships.copy(),
+            "entities": entities.copy(),
+            "relationships": relationships.copy(),
             "metadata": options.get("metadata", {}),
         }
 
@@ -175,9 +164,35 @@ class TemporalVersionManager(BaseVersionManager):
 
         # Store snapshot
         self.storage.save(snapshot)
+        self.storage.assign_version_to_unlabeled_mutations(version_label)
 
         self.logger.info(f"Created snapshot '{version_label}' by {author}")
         return snapshot
+
+    def _extract_graph_collections(
+        self, graph: Dict[str, Any]
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Normalize graph payloads to entity/relationship collections."""
+        if not isinstance(graph, dict):
+            raise ValidationError("Graph must be provided as a dictionary")
+
+        has_node_schema = "nodes" in graph or "edges" in graph
+        has_legacy_schema = "entities" in graph or "relationships" in graph
+        if not (has_node_schema or has_legacy_schema):
+            raise ValidationError(
+                "Graph dictionary is missing required schema keys. "
+                "Must contain 'nodes'/'edges' or 'entities'/'relationships'."
+            )
+
+        entities = graph.get("nodes")
+        if entities is None:
+            entities = graph.get("entities", [])
+
+        relationships = graph.get("edges")
+        if relationships is None:
+            relationships = graph.get("relationships", [])
+
+        return list(entities or []), list(relationships or [])
 
     def compare_versions(
         self,
@@ -215,6 +230,12 @@ class TemporalVersionManager(BaseVersionManager):
         detailed_diff = self._compute_detailed_diff(version1, version2)
 
         summary = {
+            "entities_added": len(detailed_diff["entities_added"]),
+            "entities_removed": len(detailed_diff["entities_removed"]),
+            "entities_modified": len(detailed_diff["entities_modified"]),
+            "relationships_added": len(detailed_diff["relationships_added"]),
+            "relationships_removed": len(detailed_diff["relationships_removed"]),
+            "relationships_modified": len(detailed_diff["relationships_modified"]),
             "nodes_added": len(detailed_diff["nodes_added"]),
             "nodes_removed": len(detailed_diff["nodes_removed"]),
             "nodes_modified": len(detailed_diff["nodes_modified"]),
@@ -243,11 +264,18 @@ class TemporalVersionManager(BaseVersionManager):
         Returns:
             Dict with detailed diff information
         """
-        nodes1 = {n.get("id", str(i)): n for i, n in enumerate(version1.get("nodes", []))}
-        nodes2 = {n.get("id", str(i)): n for i, n in enumerate(version2.get("nodes", []))}
+        version1_entities, version1_relationships = self._extract_graph_collections(
+            version1
+        )
+        version2_entities, version2_relationships = self._extract_graph_collections(
+            version2
+        )
 
-        edges1 = {self._relationship_key(e): e for e in version1.get("edges", [])}
-        edges2 = {self._relationship_key(e): e for e in version2.get("edges", [])}
+        nodes1 = {n.get("id", str(i)): n for i, n in enumerate(version1_entities)}
+        nodes2 = {n.get("id", str(i)): n for i, n in enumerate(version2_entities)}
+
+        edges1 = {self._relationship_key(e): e for e in version1_relationships}
+        edges2 = {self._relationship_key(e): e for e in version2_relationships}
 
 
         node_ids1 = set(nodes1.keys())
@@ -278,6 +306,12 @@ class TemporalVersionManager(BaseVersionManager):
                 })
 
         return {
+            "entities_added": nodes_added,
+            "entities_removed": nodes_removed,
+            "entities_modified": nodes_modified,
+            "relationships_added": edges_added,
+            "relationships_removed": edges_removed,
+            "relationships_modified": edges_modified,
             "nodes_added": nodes_added,
             "nodes_removed": nodes_removed,
             "nodes_modified": nodes_modified,
@@ -376,6 +410,8 @@ class TemporalVersionManager(BaseVersionManager):
         Injects the mutation callback into the graph to capture all node/edge changes.
         """
         graph.mutation_callback = self.record_mutation
+        if graph not in self._attached_graphs:
+            self._attached_graphs.append(graph)
         self.logger.info(f"Attached mutation tracking to graph: {getattr(graph, 'graph_id', 'unknown')}")
 
     def record_mutation(
@@ -455,12 +491,15 @@ class TemporalVersionManager(BaseVersionManager):
 
         self.logger.warning(f"Restoring graph to version '{target_version}' - clearing current state.")
         
-        graph_payload = {
-            "nodes": snapshot.get("nodes", []),
-            "edges": snapshot.get("edges", [])
-        }
-        
-        graph.from_dict(graph_payload)
+        entities, relationships = self._extract_graph_collections(snapshot)
+        graph_payload = {"nodes": entities, "edges": relationships}
+
+        previous_state = getattr(graph, "_suspend_mutation_callback", False)
+        graph._suspend_mutation_callback = True
+        try:
+            graph.from_dict(graph_payload)
+        finally:
+            graph._suspend_mutation_callback = previous_state
         
         self.logger.info(f"Successfully restored graph to version '{target_version}'.")
         return True

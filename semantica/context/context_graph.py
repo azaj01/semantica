@@ -300,6 +300,7 @@ class ContextGraph:
         self._analytics_cache = {}
         
         self.mutation_callback = self.config.get("mutation_callback", None)
+        self._suspend_mutation_callback = False
         
         enable_advanced = self.config.get("advanced_analytics", True)
         
@@ -456,7 +457,9 @@ class ContextGraph:
         node.metadata.update(attributes)
 
 
-        if getattr(self, "mutation_callback", None):
+        if getattr(self, "mutation_callback", None) and not getattr(
+            self, "_suspend_mutation_callback", False
+        ):
             self.mutation_callback("UPDATE_NODE", node_id, node.to_dict())
 
     def get_edge_data(self, source_id: str, target_id: str) -> Dict[str, Any]:
@@ -1007,7 +1010,9 @@ class ContextGraph:
         else:
             self.node_type_index['unknown'].add(node.node_id)
 
-        if getattr(self, "mutation_callback", None):
+        if getattr(self, "mutation_callback", None) and not getattr(
+            self, "_suspend_mutation_callback", False
+        ):
             try:
                 self.mutation_callback("ADD_NODE", node.node_id, node.to_dict())
             except Exception as e:
@@ -1030,7 +1035,9 @@ class ContextGraph:
         self.edge_type_index[edge.edge_type].append(edge)
         self._adjacency[edge.source_id].append(edge)
 
-        if getattr(self, "mutation_callback", None):
+        if getattr(self, "mutation_callback", None) and not getattr(
+            self, "_suspend_mutation_callback", False
+        ):
             import json
             edge_id = json.dumps([edge.source_id, edge.edge_type, edge.target_id])
             try:

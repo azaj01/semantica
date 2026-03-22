@@ -71,6 +71,8 @@ class TestTemporalVersionManager:
         assert "timestamp" in snapshot
         assert len(snapshot["entities"]) == 2
         assert len(snapshot["relationships"]) == 1
+        assert len(snapshot["nodes"]) == 2
+        assert len(snapshot["edges"]) == 1
     
     def test_create_snapshot_with_invalid_author(self):
         """Test snapshot creation with invalid author email."""
@@ -117,6 +119,8 @@ class TestTemporalVersionManager:
         versions = manager.list_versions()
         assert len(versions) == 1
         assert versions[0]["label"] == "test_v1.0"
+        assert versions[0]["entity_count"] == 2
+        assert versions[0]["relationship_count"] == 1
     
     def test_get_version(self):
         """Test retrieving specific version."""
@@ -206,6 +210,51 @@ class TestTemporalVersionManager:
         assert diff["entities_modified"][0]["id"] == "entity1"
         assert diff["entities_modified"][0]["changes"]["name"]["from"] == "Entity 1"
         assert diff["entities_modified"][0]["changes"]["name"]["to"] == "Entity 1 Updated"
+        assert diff["summary"]["nodes_added"] == 1
+        assert diff["summary"]["edges_added"] == 1
+
+    def test_create_snapshot_accepts_nodes_and_edges(self):
+        """Test ContextGraph-style node/edge payload support."""
+        manager = TemporalVersionManager()
+        graph = {
+            "nodes": [
+                {"id": "entity1", "name": "Entity 1", "type": "Person"},
+                {"id": "entity2", "name": "Entity 2", "type": "Organization"},
+            ],
+            "edges": [
+                {"source": "entity1", "target": "entity2", "type": "works_for"}
+            ],
+        }
+
+        snapshot = manager.create_snapshot(
+            graph, "nodes_v1", "test@example.com", "Node/edge snapshot"
+        )
+
+        assert len(snapshot["nodes"]) == 2
+        assert len(snapshot["edges"]) == 1
+        assert len(snapshot["entities"]) == 2
+        assert len(snapshot["relationships"]) == 1
+
+    def test_compare_versions_supports_mixed_snapshot_schemas(self):
+        """Test diff compatibility between legacy and node/edge snapshots."""
+        manager = TemporalVersionManager()
+        manager.create_snapshot(
+            {"entities": [{"id": "entity1"}], "relationships": []},
+            "v1.0",
+            "test@example.com",
+            "Version 1",
+        )
+        manager.create_snapshot(
+            {"nodes": [{"id": "entity1"}, {"id": "entity2"}], "edges": []},
+            "v2.0",
+            "test@example.com",
+            "Version 2",
+        )
+
+        diff = manager.compare_versions("v1.0", "v2.0")
+        assert diff["summary"]["entities_added"] == 1
+        assert diff["summary"]["nodes_added"] == 1
+        assert diff["entities_added"][0]["id"] == "entity2"
 
 
 class TestOntologyVersionManager:
