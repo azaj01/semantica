@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import json
 import re
-import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -19,6 +18,10 @@ class TemporalBound(Enum):
     """Sentinel bounds for open-ended temporal intervals."""
 
     OPEN = "OPEN"
+
+
+def _default_recorded_at() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -34,28 +37,23 @@ class BiTemporalFact:
 
     valid_from: Optional[datetime]
     valid_until: Optional[datetime | TemporalBound]
-    recorded_at: datetime
+    recorded_at: datetime = field(default_factory=_default_recorded_at)
     superseded_at: datetime | TemporalBound = TemporalBound.OPEN
 
     @classmethod
     def from_relationship(cls, relationship: Dict[str, Any]) -> "BiTemporalFact":
         valid_until_raw = relationship.get("valid_until", TemporalBound.OPEN)
-        if "valid_until" in relationship and relationship.get("valid_until") is None:
-            warnings.warn(
-                "`valid_until=None` is deprecated; use TemporalBound.OPEN or an explicit date.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         if valid_until_raw is None:
             valid_until_raw = TemporalBound.OPEN
 
+        valid_from = parse_temporal_value(relationship.get("valid_from"))
         recorded_at_raw = relationship.get("recorded_at")
         superseded_at_raw = relationship.get("superseded_at", TemporalBound.OPEN)
 
         return cls(
-            valid_from=parse_temporal_value(relationship.get("valid_from")),
+            valid_from=valid_from,
             valid_until=parse_temporal_bound(valid_until_raw),
-            recorded_at=parse_temporal_value(recorded_at_raw) if recorded_at_raw is not None else datetime.now(timezone.utc),
+            recorded_at=parse_temporal_value(recorded_at_raw) if recorded_at_raw is not None else (valid_from or _default_recorded_at()),
             superseded_at=parse_temporal_bound(superseded_at_raw, default=TemporalBound.OPEN),
         )
 

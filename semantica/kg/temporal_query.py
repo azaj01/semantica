@@ -6,6 +6,7 @@ import copy
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from ..utils.progress_tracker import get_progress_tracker
 from .temporal_model import (
@@ -487,6 +488,8 @@ class TemporalGraphQuery:
 
     def _parse_time(self, time_value):
         """Parse time value into a UTC-normalized datetime."""
+        if time_value in (TemporalBound.OPEN, TemporalBound.OPEN.value):
+            return None
         try:
             return parse_temporal_value(time_value)
         except TemporalValidationError:
@@ -927,7 +930,10 @@ class TemporalVersionManager:
         and relationship type. This preserves all prior versions instead of
         trying to collapse them into a single mutable record.
         """
+        from ..change_management import compute_checksum
+
         revision_time = datetime.now(timezone.utc)
+        revision_suffix = self._generate_revision_suffix(revision_time)
         relationships = copy.deepcopy(snapshot.get("relationships", []))
         fact_ids = set(revision.get("fact_ids", []))
         new_valid_from = parse_temporal_value(revision.get("new_valid_from"))
@@ -962,7 +968,7 @@ class TemporalVersionManager:
             revised_relationships.append(original)
 
             replacement = copy.deepcopy(rel)
-            replacement["id"] = f"{rel_id}__rev__{int(revision_time.timestamp())}"
+            replacement["id"] = f"{rel_id}__rev__{revision_suffix}"
             replacement["valid_from"] = serialize_temporal_value(new_valid_from)
             replacement["valid_until"] = (
                 TemporalBound.OPEN if new_valid_until is TemporalBound.OPEN else serialize_temporal_value(new_valid_until)
@@ -985,17 +991,23 @@ class TemporalVersionManager:
         ]
         base_label = snapshot.get("label", "snapshot")
         original_label = base_label
-        revised_label = f"{base_label}__revision__{int(revision_time.timestamp())}"
+        revised_label = f"{base_label}__revision__{revision_suffix}"
 
         original_snapshot = copy.deepcopy(snapshot)
         original_snapshot["label"] = original_label
         original_snapshot_inserted = False
         if self.storage.get(original_label) is None:
+            original_snapshot["checksum"] = compute_checksum(
+                {k: v for k, v in original_snapshot.items() if k != "checksum"}
+            )
             self.storage.save(original_snapshot)
             original_snapshot_inserted = True
 
         revised_snapshot["label"] = revised_label
         revised_snapshot.setdefault("metadata", {})["revision_event"] = temporal_structure_to_json_ready(provenance_event)
+        revised_snapshot["checksum"] = compute_checksum(
+            {k: v for k, v in revised_snapshot.items() if k != "checksum"}
+        )
         try:
             self.storage.save(revised_snapshot)
         except Exception as exc:
@@ -1117,6 +1129,10 @@ class TemporalVersionManager:
         target = relationship.get("target", "")
         rel_type = relationship.get("type", relationship.get("relationship", ""))
         return f"{source}|{rel_type}|{target}"
+
+    def _generate_revision_suffix(self, revision_time: datetime) -> str:
+        timestamp_part = revision_time.strftime("%Y%m%dT%H%M%S%fZ")
+        return f"{timestamp_part}_{uuid4().hex[:8]}"
 
     def _warn_on_retroactive_overlap(
         self,

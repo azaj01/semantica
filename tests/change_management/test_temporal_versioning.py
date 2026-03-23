@@ -9,6 +9,7 @@ import os
 import tempfile
 import pytest
 from datetime import datetime, timezone
+from unittest.mock import patch
 from semantica.kg.temporal_query import TemporalVersionManager
 from semantica.kg.temporal_model import TemporalBound
 from semantica.change_management import ChangeLogEntry, InMemoryVersionStorage, SQLiteVersionStorage
@@ -280,6 +281,94 @@ class TestTemporalVersionManager:
         assert original is not None
         assert manager.get_version(revised["label"]) is not None
         assert len(manager.list_versions()) == 2
+        assert manager.verify_checksum(revised) is True
+
+    def test_apply_revision_recomputes_checksums_for_saved_snapshots(self):
+        manager = TemporalVersionManager()
+        snapshot = manager.create_snapshot(
+            graph={
+                "entities": [],
+                "relationships": [
+                    {
+                        "id": "fact-1",
+                        "source": "drug_a",
+                        "target": "drug_b",
+                        "type": "interacts_with",
+                        "valid_from": "2021-01-01",
+                        "valid_until": TemporalBound.OPEN,
+                    }
+                ],
+            },
+            version_label="v1.0",
+            author="alice@company.com",
+            description="Initial version",
+        )
+
+        revised = manager.apply_revision(
+            snapshot,
+            {
+                "fact_ids": ["fact-1"],
+                "new_valid_from": "2019-01-01",
+                "new_valid_until": None,
+                "revision_type": "retroactive",
+                "author": "alice@company.com",
+                "reason": "Backfilled evidence",
+            },
+        )
+
+        assert manager.verify_checksum(revised) is True
+        persisted_original = manager.get_version("v1.0")
+        assert persisted_original is not None
+        assert manager.verify_checksum(persisted_original) is True
+
+    def test_generate_revision_suffix_is_collision_resistant(self):
+        manager = TemporalVersionManager()
+        revision_time = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
+
+        suffix_one = manager._generate_revision_suffix(revision_time)
+        suffix_two = manager._generate_revision_suffix(revision_time)
+
+        assert suffix_one != suffix_two
+
+    def test_apply_revision_uses_collision_resistant_suffix_for_ids_and_labels(self):
+        manager = TemporalVersionManager()
+        snapshot = manager.create_snapshot(
+            graph={
+                "entities": [],
+                "relationships": [
+                    {
+                        "id": "fact-1",
+                        "source": "drug_a",
+                        "target": "drug_b",
+                        "type": "interacts_with",
+                        "valid_from": "2021-01-01",
+                        "valid_until": TemporalBound.OPEN,
+                    }
+                ],
+            },
+            version_label="v1.0",
+            author="alice@company.com",
+            description="Initial version",
+        )
+
+        with patch.object(manager, "_generate_revision_suffix", return_value="fixed_suffix"):
+            revised = manager.apply_revision(
+                snapshot,
+                {
+                    "fact_ids": ["fact-1"],
+                    "new_valid_from": "2019-01-01",
+                    "new_valid_until": None,
+                    "revision_type": "retroactive",
+                    "author": "alice@company.com",
+                    "reason": "Backfilled evidence",
+                },
+            )
+
+        assert revised["label"].endswith("__revision__fixed_suffix")
+        replacement = next(
+            rel for rel in revised["relationships"] if rel["id"].startswith("fact-1__rev__")
+        )
+        assert replacement["id"] == "fact-1__rev__fixed_suffix"
     
     def test_detailed_entity_diff(self):
         """Test detailed entity-level differences."""

@@ -333,7 +333,7 @@ class TestTemporalGraphQuery(unittest.TestCase):
         with self.assertRaises(TemporalValidationError):
             self.query_engine._parse_time("not-a-date")
 
-    def test_query_at_time_supports_open_bound_and_none_warning(self):
+    def test_query_at_time_supports_open_bound_and_canonical_none_without_warning(self):
         graph = {
             "relationships": [
                 {
@@ -358,7 +358,7 @@ class TestTemporalGraphQuery(unittest.TestCase):
             result = self.query_engine.query_at_time(graph, "", "2026-01-01")
 
         self.assertEqual(len(result["relationships"]), 2)
-        self.assertTrue(any(item.category is DeprecationWarning for item in caught))
+        self.assertFalse(any(item.category is DeprecationWarning for item in caught))
 
     def test_query_at_time_supports_transaction_axis(self):
         graph = {
@@ -384,6 +384,46 @@ class TestTemporalGraphQuery(unittest.TestCase):
 
         self.assertEqual(len(result_2020["relationships"]), 0)
         self.assertEqual(len(result_2021["relationships"]), 1)
+
+    def test_analyze_evolution_accepts_open_valid_until(self):
+        graph = {
+            "relationships": [
+                {
+                    "source": "1",
+                    "target": "2",
+                    "type": "current",
+                    "valid_from": "2024-01-01",
+                    "valid_until": TemporalBound.OPEN,
+                }
+            ]
+        }
+
+        result = self.query_engine.analyze_evolution(
+            graph,
+            start_time="2025-01-01",
+            end_time="2025-12-31",
+        )
+
+        self.assertEqual(result["num_relationships"], 1)
+
+    def test_query_at_time_legacy_transaction_axis_uses_valid_from_when_recorded_missing(self):
+        graph = {
+            "relationships": [
+                {
+                    "source": "1",
+                    "target": "2",
+                    "type": "legacy",
+                    "valid_from": "2024-01-01",
+                    "valid_until": TemporalBound.OPEN,
+                }
+            ]
+        }
+
+        result = self.query_engine.query_at_time(
+            graph, "", "2025-06-01", time_axis="transaction"
+        )
+
+        self.assertEqual(len(result["relationships"]), 1)
 
     def test_null_valid_until_deserializes_to_open(self):
         relationship = deserialize_relationship_temporal_fields(
