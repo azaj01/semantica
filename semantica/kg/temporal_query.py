@@ -4,8 +4,10 @@ Temporal Query Module
 
 import copy
 import warnings
+from collections import defaultdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from ..utils.progress_tracker import get_progress_tracker
@@ -20,6 +22,19 @@ from .temporal_model import (
     temporal_structure_to_json_ready,
 )
 from ..utils.exceptions import ProcessingError, TemporalValidationError
+
+
+@dataclass
+class TemporalConsistencyIssue:
+    message: str
+    fact_id: str
+    issue_type: str
+
+
+@dataclass
+class TemporalConsistencyReport:
+    errors: List[Dict[str, str]]
+    warnings: List[Dict[str, str]]
 
 
 class TemporalGraphQuery:
@@ -126,16 +141,15 @@ class TemporalGraphQuery:
 
         # Parse time
         query_time = self._parse_time(at_time)
-
-        # Filter relationships valid at query time
-        relationships = []
-        if "relationships" in graph:
-            for rel in graph.get("relationships", []):
-                if self._relationship_active_at_time(rel, query_time, time_axis=time_axis):
-                    relationships.append(rel)
+        reconstructed_graph = self.reconstruct_at_time(
+            graph,
+            query_time,
+            time_axis=time_axis,
+        )
 
         # Get entities
-        entities = graph.get("entities", [])
+        entities = reconstructed_graph.get("entities", [])
+        relationships = reconstructed_graph.get("relationships", [])
 
         # Include history if requested
         if include_history:
@@ -150,6 +164,195 @@ class TemporalGraphQuery:
             "num_entities": len(entities),
             "num_relationships": len(relationships),
         }
+
+    def reconstruct_at_time(
+        self,
+        graph: Any,
+        at_time: Any,
+        *,
+        time_axis: str = "valid",
+    ) -> Dict[str, Any]:
+        """Return a self-consistent subgraph for a single point in time."""
+        query_time = at_time if isinstance(at_time, datetime) else self._parse_time(at_time)
+        reconstructed = copy.deepcopy(graph)
+        entity_list = graph.get("entities", [])
+
+        if not entity_list:
+            reconstructed["entities"] = []
+            reconstructed["relationships"] = [
+                copy.deepcopy(relationship)
+                for relationship in graph.get("relationships", [])
+                if self._relationship_active_at_time(relationship, query_time, time_axis=time_axis)
+            ]
+            return reconstructed
+
+        entity_index = {
+            self._entity_id(entity): entity
+            for entity in entity_list
+            if self._entity_active_at_time(entity, query_time, time_axis=time_axis)
+        }
+
+        relationships = []
+        for relationship in graph.get("relationships", []):
+            if not self._relationship_active_at_time(relationship, query_time, time_axis=time_axis):
+                continue
+            source = self._entity_id({"id": relationship.get("source")})
+            target = self._entity_id({"id": relationship.get("target")})
+            if source not in entity_index or target not in entity_index:
+                continue
+            relationships.append(copy.deepcopy(relationship))
+
+        reconstructed["entities"] = list(entity_index.values())
+        reconstructed["relationships"] = relationships
+        return reconstructed
+
+    def validate_temporal_consistency(self, graph: Any) -> TemporalConsistencyReport:
+        errors: List[Dict[str, str]] = []
+        warnings_list: List[Dict[str, str]] = []
+
+        entities = {
+            self._entity_id(entity): entity
+            for entity in graph.get("entities", [])
+        }
+        rel_groups: Dict[tuple[str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+
+        for relationship in graph.get("relationships", []):
+            rel_id = relationship.get("id") or self._relationship_key(relationship)
+            rel_groups[
+                (
+                    relationship.get("source", ""),
+                    relationship.get("type", relationship.get("relationship", "")),
+                    relationship.get("target", ""),
+                )
+            ].append(relationship)
+
+            try:
+                start, end = self._get_axis_bounds(relationship, "valid")
+            except TemporalValidationError as exc:
+                errors.append(
+                    asdict(
+                        TemporalConsistencyIssue(
+                            message=f"Unable to parse temporal fields: {exc}",
+                            fact_id=rel_id,
+                            issue_type="invalid_temporal_fields",
+                        )
+                    )
+                )
+                continue
+            if start and isinstance(end, datetime) and self._compare_times(start, end) > 0:
+                errors.append(
+                    asdict(
+                        TemporalConsistencyIssue(
+                            message="Relationship has an inverted validity interval.",
+                            fact_id=rel_id,
+                            issue_type="inverted_interval",
+                        )
+                    )
+                )
+
+            for endpoint in ("source", "target"):
+                entity = entities.get(relationship.get(endpoint))
+                if entity is None:
+                    errors.append(
+                        asdict(
+                            TemporalConsistencyIssue(
+                                message=f"Relationship references missing {endpoint} entity.",
+                                fact_id=rel_id,
+                                issue_type=f"missing_{endpoint}_entity",
+                            )
+                        )
+                    )
+                    continue
+                try:
+                    within_lifetime = self._window_within_entity_lifetime(entity, start, end)
+                except TemporalValidationError as exc:
+                    errors.append(
+                        asdict(
+                            TemporalConsistencyIssue(
+                                message=f"Unable to parse {endpoint} entity lifetime: {exc}",
+                                fact_id=rel_id,
+                                issue_type=f"invalid_{endpoint}_temporal_fields",
+                            )
+                        )
+                    )
+                    continue
+                if not within_lifetime:
+                    errors.append(
+                        asdict(
+                            TemporalConsistencyIssue(
+                                message=f"Relationship validity falls outside {endpoint} entity lifetime.",
+                                fact_id=rel_id,
+                                issue_type=f"{endpoint}_lifetime_mismatch",
+                            )
+                        )
+                    )
+        for relationships in rel_groups.values():
+            safe_relationships = []
+            for relationship in relationships:
+                rel_id = relationship.get("id") or self._relationship_key(relationship)
+                try:
+                    start, end = self._get_axis_bounds(relationship, "valid")
+                except TemporalValidationError as exc:
+                    errors.append(
+                        asdict(
+                            TemporalConsistencyIssue(
+                                message=f"Unable to parse temporal fields: {exc}",
+                                fact_id=rel_id,
+                                issue_type="invalid_temporal_fields",
+                            )
+                        )
+                    )
+                    continue
+                safe_relationships.append((relationship, start, end))
+            ordered = sorted(
+                safe_relationships,
+                key=lambda item: self._sort_key(item[1]),
+            )
+            for index, (current, current_start, current_end) in enumerate(ordered):
+                current_id = current.get("id") or self._relationship_key(current)
+                if index > 0:
+                    _, previous_start, previous_end = ordered[index - 1]
+                    if self._range_overlaps_bounds(
+                        current_start or datetime.min.replace(tzinfo=timezone.utc),
+                        current_end if isinstance(current_end, datetime) else datetime.max.replace(tzinfo=timezone.utc),
+                        previous_start,
+                        previous_end,
+                    ):
+                        warnings_list.append(
+                            asdict(
+                                TemporalConsistencyIssue(
+                                    message="Relationship overlaps another relationship with the same edge and type.",
+                                    fact_id=current_id,
+                                    issue_type="overlapping_same_edge",
+                                )
+                            )
+                        )
+                    elif (
+                        isinstance(previous_end, datetime)
+                        and current_start
+                        and self._compare_times(current_start, previous_end) > 0
+                    ):
+                        warnings_list.append(
+                            asdict(
+                                TemporalConsistencyIssue(
+                                    message="Relationship restarts after a temporal gap.",
+                                    fact_id=current_id,
+                                    issue_type="gap_after_restart",
+                                )
+                            )
+                        )
+                    elif current_start and previous_start and self._compare_times(current_start, previous_start) == 0:
+                        warnings_list.append(
+                            asdict(
+                                TemporalConsistencyIssue(
+                                    message="Relationship interval overlaps another interval on the same edge.",
+                                    fact_id=current_id,
+                                    issue_type="overlapping_same_edge",
+                                )
+                            )
+                        )
+
+        return TemporalConsistencyReport(errors=errors, warnings=warnings_list)
 
     def query_time_range(
         self,
@@ -197,6 +400,7 @@ class TemporalGraphQuery:
 
         # Filter relationships valid in time range
         relationships = []
+        relationship_buckets = None
         if "relationships" in graph:
             for rel in graph.get("relationships", []):
                 if self._relationship_overlaps_range(
@@ -217,13 +421,14 @@ class TemporalGraphQuery:
             ]
         elif temporal_aggregation == "evolution":
             # Group by time periods
-            relationships = self._group_by_time_periods(relationships, start, end)
+            relationship_buckets = self._group_by_time_periods(relationships, start, end)
 
         return {
             "query": query,
             "start_time": start,
             "end_time": end,
             "relationships": relationships,
+            "relationship_buckets": relationship_buckets,
             "num_relationships": len(relationships),
             "aggregation": temporal_aggregation,
         }
@@ -390,6 +595,8 @@ class TemporalGraphQuery:
         end_time: Optional[Any] = None,
         max_path_length: Optional[int] = None,
         temporal_constraints: Optional[Dict[str, Any]] = None,
+        enforce_causal_ordering: bool = True,
+        ordering_strategy: Literal["strict", "overlap", "loose"] = "strict",
         **options,
     ) -> Dict[str, Any]:
         """
@@ -477,7 +684,13 @@ class TemporalGraphQuery:
 
             for neighbor, rel in adjacency.get(node, []):
                 if neighbor not in path:  # Avoid cycles
-                    queue.append((neighbor, path + [neighbor], edges + [rel]))
+                    next_edges = edges + [rel]
+                    if self._path_respects_causal_order(
+                        next_edges,
+                        enforce_causal_ordering=enforce_causal_ordering,
+                        ordering_strategy=ordering_strategy,
+                    ):
+                        queue.append((neighbor, path + [neighbor], next_edges))
 
         return {
             "source": source,
@@ -539,7 +752,7 @@ class TemporalGraphQuery:
     def _is_point_in_bounds(self, point: datetime, start: Optional[datetime], end: Optional[datetime | TemporalBound]) -> bool:
         if start and self._compare_times(point, start) < 0:
             return False
-        if isinstance(end, datetime) and self._compare_times(point, end) > 0:
+        if isinstance(end, datetime) and self._compare_times(point, end) >= 0:
             return False
         return True
 
@@ -578,10 +791,118 @@ class TemporalGraphQuery:
             for axis in axes
         )
 
+    def _entity_id(self, entity: Dict[str, Any]) -> str:
+        return str(entity.get("id", entity.get("name", "")))
+
+    def _entity_active_at_time(self, entity: Dict[str, Any], query_time: datetime, *, time_axis: str) -> bool:
+        relationship_like = {
+            "valid_from": entity.get("valid_from"),
+            "valid_until": entity.get("valid_until", TemporalBound.OPEN),
+            "recorded_at": entity.get("recorded_at", entity.get("valid_from")),
+            "superseded_at": entity.get("superseded_at", TemporalBound.OPEN),
+        }
+        return self._relationship_active_at_time(relationship_like, query_time, time_axis=time_axis)
+
+    def _window_within_entity_lifetime(
+        self,
+        entity: Dict[str, Any],
+        rel_start: Optional[datetime],
+        rel_end: Optional[datetime | TemporalBound],
+    ) -> bool:
+        entity_start = self._parse_time(entity.get("valid_from")) if entity.get("valid_from") is not None else None
+        entity_end = parse_temporal_bound(entity.get("valid_until"), default=TemporalBound.OPEN)
+        if rel_start and entity_start and self._compare_times(rel_start, entity_start) < 0:
+            return False
+        if isinstance(entity_end, datetime):
+            if rel_start and self._compare_times(rel_start, entity_end) > 0:
+                return False
+            if isinstance(rel_end, datetime) and self._compare_times(rel_end, entity_end) > 0:
+                return False
+            if rel_end is TemporalBound.OPEN:
+                return False
+        return True
+
+    def _sort_key(self, value: Optional[datetime]) -> datetime:
+        return value or datetime.min.replace(tzinfo=timezone.utc)
+
+    def _period_floor(self, value: datetime) -> datetime:
+        if self.temporal_granularity == "week":
+            return (value - timedelta(days=value.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.temporal_granularity == "month":
+            return value.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if self.temporal_granularity == "year":
+            return value.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return self._truncate_to_granularity(value)
+
+    def _next_period(self, value: datetime) -> datetime:
+        if self.temporal_granularity == "day":
+            return value + timedelta(days=1)
+        if self.temporal_granularity == "week":
+            return value + timedelta(weeks=1)
+        if self.temporal_granularity == "month":
+            if value.month == 12:
+                return value.replace(year=value.year + 1, month=1)
+            return value.replace(month=value.month + 1)
+        if self.temporal_granularity == "year":
+            return value.replace(year=value.year + 1)
+        return value + timedelta(days=1)
+
+    def _period_label(self, value: datetime) -> str:
+        if self.temporal_granularity == "week":
+            return f"{value.isocalendar().year}-W{value.isocalendar().week:02d}"
+        if self.temporal_granularity == "month":
+            return value.strftime("%Y-%m")
+        if self.temporal_granularity == "year":
+            return value.strftime("%Y")
+        return value.strftime("%Y-%m-%d")
+
+    def _path_respects_causal_order(
+        self,
+        edges: List[Dict[str, Any]],
+        *,
+        enforce_causal_ordering: bool,
+        ordering_strategy: Literal["strict", "overlap", "loose"],
+    ) -> bool:
+        if not enforce_causal_ordering or ordering_strategy == "loose" or len(edges) < 2:
+            return True
+
+        previous = edges[-2]
+        current = edges[-1]
+        previous_start, previous_end = self._get_axis_bounds(previous, "valid")
+        current_start, _ = self._get_axis_bounds(current, "valid")
+
+        if ordering_strategy == "strict":
+            if previous_start and current_start and self._compare_times(current_start, previous_start) < 0:
+                return False
+            return True
+        if ordering_strategy == "overlap":
+            if current_start is None:
+                return True
+            if isinstance(previous_end, datetime):
+                return self._compare_times(current_start, previous_end) <= 0
+            return True
+        return True
+
     def _group_by_time_periods(self, relationships, start, end):
-        """Group relationships by time periods."""
-        # Simplified grouping
-        return relationships
+        """Group relationships into calendar-aligned buckets."""
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        current = self._period_floor(start)
+        end_bound = self._period_floor(end)
+
+        while current <= end_bound:
+            bucket_end = self._next_period(current)
+            label = self._period_label(current)
+            for relationship in relationships:
+                if self._relationship_overlaps_range(
+                    relationship,
+                    current,
+                    bucket_end,
+                    time_axis="valid",
+                ):
+                    buckets[label].append(relationship)
+            current = bucket_end
+
+        return dict(buckets)
 
 
 class TemporalPatternDetector:
@@ -650,6 +971,8 @@ class TemporalPatternDetector:
             list: List of detected pattern dictionaries
         """
         self.logger.info(f"Detecting temporal patterns: {pattern_type}")
+        if "gap_tolerance" in options:
+            self.config["gap_tolerance"] = options["gap_tolerance"]
 
         relationships = graph.get("relationships", [])
 
@@ -669,13 +992,148 @@ class TemporalPatternDetector:
 
     def _find_sequences(self, relationships, min_frequency):
         """Find sequential patterns."""
-        # Simplified sequence detection
-        return []
+        # Pattern output design:
+        # - sequences return dicts with pattern_type/signature/frequency/occurrences
+        # - each occurrence stores ordered nodes, ordered edges, and start/end timestamps
+        gap_tolerance = self._resolve_gap_tolerance()
+        outgoing: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for relationship in relationships:
+            outgoing[relationship.get("source")].append(relationship)
+
+        occurrences = defaultdict(list)
+        for relationship in relationships:
+            sequence = [relationship]
+            current = relationship
+            while True:
+                next_candidates = []
+                _, current_end = self._get_axis_bounds(current)
+                if current_end is TemporalBound.OPEN:
+                    break
+                for candidate in outgoing.get(current.get("target"), []):
+                    if candidate is current:
+                        continue
+                    candidate_start, _ = self._get_axis_bounds(candidate)
+                    if not isinstance(current_end, datetime) or candidate_start is None:
+                        continue
+                    gap = candidate_start - current_end
+                    if gap < timedelta(0) or gap > gap_tolerance:
+                        continue
+                    next_candidates.append((candidate_start, candidate))
+                if not next_candidates:
+                    break
+                next_candidates.sort(key=lambda item: item[0])
+                current = next_candidates[0][1]
+                sequence.append(current)
+
+            if len(sequence) < 2:
+                continue
+
+            signature = tuple(
+                [sequence[0].get("source")] + [edge.get("target") for edge in sequence]
+            )
+            occurrences[signature].append(
+                {
+                    "nodes": list(signature),
+                    "edges": [copy.deepcopy(edge) for edge in sequence],
+                    "start_time": serialize_temporal_value(self._get_axis_bounds(sequence[0])[0]),
+                    "end_time": serialize_temporal_value(self._sequence_end(sequence)),
+                }
+            )
+
+        return [
+            {
+                "pattern_type": "sequence",
+                "signature": signature,
+                "frequency": len(items),
+                "occurrences": items,
+            }
+            for signature, items in occurrences.items()
+            if len(items) >= min_frequency
+        ]
 
     def _find_cycles(self, relationships, min_frequency):
         """Find cyclic patterns."""
-        # Simplified cycle detection
-        return []
+        # Pattern output design mirrors sequences:
+        # - cycles return pattern_type/signature/frequency/occurrences
+        # - each occurrence records the ordered cycle nodes, edges, and time span
+        outgoing: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for relationship in relationships:
+            outgoing[relationship.get("source")].append(relationship)
+
+        occurrences = defaultdict(list)
+        for relationship in relationships:
+            start_node = relationship.get("source")
+            path_edges = [relationship]
+            visited_nodes = [start_node, relationship.get("target")]
+            current = relationship
+
+            while len(path_edges) <= 6:
+                if visited_nodes[-1] == start_node:
+                    signature = tuple(visited_nodes)
+                    occurrences[signature].append(
+                        {
+                            "nodes": visited_nodes[:],
+                            "edges": [copy.deepcopy(edge) for edge in path_edges],
+                            "start_time": serialize_temporal_value(self._get_axis_bounds(path_edges[0])[0]),
+                            "end_time": serialize_temporal_value(self._sequence_end(path_edges)),
+                        }
+                    )
+                    break
+
+                next_candidates = []
+                _, current_end = self._get_axis_bounds(current)
+                for candidate in outgoing.get(visited_nodes[-1], []):
+                    candidate_start, _ = self._get_axis_bounds(candidate)
+                    if isinstance(current_end, datetime) and candidate_start and self._compare_times(candidate_start, current_end) < 0:
+                        continue
+                    next_candidates.append((self._sort_key(candidate_start), candidate))
+                if not next_candidates:
+                    break
+                next_candidates.sort(key=lambda item: item[0])
+                current = next_candidates[0][1]
+                next_target = current.get("target")
+                if next_target in visited_nodes[1:-1] and next_target != start_node:
+                    break
+                path_edges.append(current)
+                visited_nodes.append(next_target)
+
+        return [
+            {
+                "pattern_type": "cycle",
+                "signature": signature,
+                "frequency": len(items),
+                "occurrences": items,
+            }
+            for signature, items in occurrences.items()
+            if len(items) >= min_frequency
+        ]
+
+    def _resolve_gap_tolerance(self) -> timedelta:
+        gap_tolerance = self.config.get("gap_tolerance", timedelta(days=0))
+        if isinstance(gap_tolerance, timedelta):
+            return gap_tolerance
+        if isinstance(gap_tolerance, (int, float)):
+            return timedelta(days=gap_tolerance)
+        return timedelta(days=0)
+
+    def _sequence_end(self, edges: List[Dict[str, Any]]) -> Optional[datetime]:
+        last_start, last_end = self._get_axis_bounds(edges[-1])
+        if isinstance(last_end, datetime):
+            return last_end
+        return last_start
+
+    def _get_axis_bounds(self, relationship: Dict[str, Any]) -> tuple[Optional[datetime], Optional[datetime | TemporalBound]]:
+        normalized = deserialize_relationship_temporal_fields(relationship)
+        fact = BiTemporalFact.from_relationship(normalized)
+        return fact.valid_from, fact.valid_until
+
+    def _compare_times(self, time1: Optional[datetime], time2: Optional[datetime]) -> int:
+        if time1 is None or time2 is None:
+            return 0
+        return (time1 > time2) - (time1 < time2)
+
+    def _sort_key(self, value: Optional[datetime]) -> datetime:
+        return value or datetime.min.replace(tzinfo=timezone.utc)
 
 
 class TemporalVersionManager:
@@ -1052,7 +1510,7 @@ class TemporalVersionManager:
         """
         from ..change_management import verify_checksum
         return verify_checksum(snapshot)
-    
+
     def _compute_detailed_diff(self, version1: Dict[str, Any], version2: Dict[str, Any]) -> Dict[str, Any]:
         """
         Compute detailed entity and relationship differences between versions.
@@ -1215,3 +1673,8 @@ class TemporalVersionManager:
                 changes[key] = {"from": val1, "to": val2}
         
         return changes
+
+
+def validate_temporal_consistency(graph: Any) -> TemporalConsistencyReport:
+    """Module-level validator entry point required by the temporal query API."""
+    return TemporalGraphQuery().validate_temporal_consistency(graph)

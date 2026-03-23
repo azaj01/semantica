@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Temporal Query Engine: Point-in-Time Correctness** (PR #397 by @KaifAhmad1, implemented and follow-up fixes by OpenAI Codex):
+  - Added `reconstruct_at_time(graph, at_time)` to `TemporalGraphQuery` to build a self-consistent point-in-time subgraph without mutating the input graph
+  - Updated `query_at_time()` to use point-in-time reconstruction internally so returned subgraphs exclude dangling edges when entity lifetimes are available
+  - Added `TemporalConsistencyIssue` and `TemporalConsistencyReport` plus temporal consistency validation for:
+    - inverted relationship intervals
+    - relationships outside entity lifetimes
+    - missing source/target entities
+    - overlapping same-type relationships on the same edge
+    - temporal gaps where a fact ends and restarts later
+  - Added a module-level `validate_temporal_consistency(graph)` API alongside the query-engine method
+  - Implemented sequence and cycle pattern detection with structured outputs containing `pattern_type`, `signature`, `frequency`, and per-occurrence node/edge/time details
+  - Implemented calendar-aligned temporal evolution bucketing based on `temporal_granularity`
+  - Added causal ordering controls to `find_temporal_paths()` via `enforce_causal_ordering` and `ordering_strategy` (`strict`, `overlap`, `loose`)
+  - **Follow-up fixes applied in the same PR**:
+    - Made `validate_temporal_consistency()` non-throwing on malformed temporal fields and return report errors instead of raising
+    - Enforced exclusive `valid_until` semantics for point-in-time checks (`valid_from <= at_time < valid_until`)
+    - Kept `query_time_range(..., temporal_aggregation="evolution")` backward-compatible by returning the flat relationship list plus a new `relationship_buckets` field
+    - Hardened temporal pattern detection for open-ended intervals (`TemporalBound.OPEN`) to avoid datetime arithmetic/comparison crashes
+    - Normalized relationship endpoints during point-in-time reconstruction so mixed-type IDs like `1` and `"1"` do not silently drop valid edges
+    - Added in-code design comments documenting the sequence/cycle output structure required by the checklist
+  - Added and expanded regression coverage for point-in-time reconstruction, exclusive end bounds, non-throwing validation, module-level validator access, pattern detection with gap tolerance/open bounds, evolution bucketing, causal ordering, and mixed-type IDs
+
 - **Core Temporal Data Model Overhaul** (PR #396 by @KaifAhmad1, implemented and follow-up fixes by OpenAI Codex):
   - Added `semantica.kg.temporal_model` with shared helpers for parsing, normalizing, serializing, and deserializing temporal relationship fields
   - Exported `TemporalBound` and `BiTemporalFact` from `semantica.kg` for backward-compatible temporal relationship handling

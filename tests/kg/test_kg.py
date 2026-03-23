@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from semantica.kg.graph_builder import GraphBuilder
 from semantica.kg.graph_analyzer import GraphAnalyzer
 from semantica.kg.temporal_model import TemporalBound, deserialize_relationship_temporal_fields
+from semantica.kg.temporal_query import TemporalConsistencyReport, validate_temporal_consistency
 from semantica.utils.exceptions import TemporalValidationError
 
 class TestGraphBuilder(unittest.TestCase):
@@ -430,6 +431,244 @@ class TestTemporalGraphQuery(unittest.TestCase):
             {"source": "1", "target": "2", "type": "rel", "valid_from": "2024-01-01", "valid_until": None}
         )
         self.assertIs(relationship["valid_until"], TemporalBound.OPEN)
+
+    def test_reconstruct_at_time_removes_dangling_edges_and_does_not_mutate_input(self):
+        graph = {
+            "entities": [
+                {"id": "1", "valid_from": "2020-01-01", "valid_until": "2023-01-01"},
+                {"id": "2", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": "3", "valid_from": "2025-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+            "relationships": [
+                {"id": "r1", "source": "1", "target": "2", "type": "rel", "valid_from": "2022-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": "r2", "source": "2", "target": "3", "type": "rel", "valid_from": "2024-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+        }
+        original = {
+            "entities": [dict(entity) for entity in graph["entities"]],
+            "relationships": [dict(rel) for rel in graph["relationships"]],
+        }
+
+        reconstructed = self.query_engine.reconstruct_at_time(graph, "2024-06-01")
+
+        self.assertEqual([entity["id"] for entity in reconstructed["entities"]], ["2"])
+        self.assertEqual(reconstructed["relationships"], [])
+        self.assertEqual(graph, original)
+
+    def test_query_at_time_uses_self_consistent_reconstruction(self):
+        graph = {
+            "entities": [
+                {"id": "1", "valid_from": "2020-01-01", "valid_until": "2023-01-01"},
+                {"id": "2", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+            "relationships": [
+                {"source": "1", "target": "2", "type": "rel", "valid_from": "2022-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+        }
+
+        result = self.query_engine.query_at_time(graph, "", "2024-06-01")
+
+        self.assertEqual(result["num_entities"], 1)
+        self.assertEqual(result["num_relationships"], 0)
+
+    def test_query_at_time_treats_valid_until_as_exclusive(self):
+        graph = {
+            "entities": [
+                {"id": "1", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": "2", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+            "relationships": [
+                {"source": "1", "target": "2", "type": "rel", "valid_from": "2020-01-01", "valid_until": "2024-06-01"},
+            ],
+        }
+
+        result = self.query_engine.query_at_time(graph, "", "2024-06-01")
+
+        self.assertEqual(result["num_relationships"], 0)
+
+    def test_validate_temporal_consistency_reports_errors_and_warnings(self):
+        graph = {
+            "entities": [
+                {"id": "A", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": "B", "valid_from": "2020-01-01", "valid_until": "2022-01-01"},
+            ],
+            "relationships": [
+                {"id": "bad-range", "source": "A", "target": "B", "type": "rel", "valid_from": "2023-01-01", "valid_until": "2022-01-01"},
+                {"id": "outside-life", "source": "A", "target": "B", "type": "rel", "valid_from": "2021-06-01", "valid_until": "2023-06-01"},
+                {"id": "gap-1", "source": "A", "target": "B", "type": "same", "valid_from": "2020-01-01", "valid_until": "2020-06-01"},
+                {"id": "gap-2", "source": "A", "target": "B", "type": "same", "valid_from": "2020-07-01", "valid_until": "2020-12-01"},
+                {"id": "overlap-1", "source": "A", "target": "B", "type": "dup", "valid_from": "2021-01-01", "valid_until": "2021-06-01"},
+                {"id": "overlap-2", "source": "A", "target": "B", "type": "dup", "valid_from": "2021-05-01", "valid_until": "2021-08-01"},
+            ],
+        }
+
+        report = self.query_engine.validate_temporal_consistency(graph)
+
+        self.assertIsInstance(report, TemporalConsistencyReport)
+        self.assertTrue(any(issue["fact_id"] == "bad-range" for issue in report.errors))
+        self.assertTrue(any(issue["fact_id"] == "outside-life" for issue in report.errors))
+        self.assertTrue(any(issue["fact_id"] == "gap-2" for issue in report.warnings))
+        self.assertTrue(any(issue["fact_id"] == "overlap-2" for issue in report.warnings))
+
+    def test_validate_temporal_consistency_clean_graph(self):
+        graph = {
+            "entities": [
+                {"id": "A", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": "B", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+            "relationships": [
+                {"id": "ok", "source": "A", "target": "B", "type": "rel", "valid_from": "2020-02-01", "valid_until": "2020-05-01"},
+            ],
+        }
+
+        report = self.query_engine.validate_temporal_consistency(graph)
+
+        self.assertEqual(report.errors, [])
+        self.assertEqual(report.warnings, [])
+
+    def test_validate_temporal_consistency_never_raises_on_invalid_temporal_data(self):
+        graph = {
+            "entities": [{"id": "A", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN}],
+            "relationships": [
+                {"id": "bad", "source": "A", "target": "A", "type": "rel", "valid_from": "not-a-date", "valid_until": TemporalBound.OPEN},
+            ],
+        }
+
+        report = self.query_engine.validate_temporal_consistency(graph)
+
+        self.assertTrue(any(issue["fact_id"] == "bad" for issue in report.errors))
+
+    def test_module_level_validate_temporal_consistency_function(self):
+        graph = {
+            "entities": [{"id": "A", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN}],
+            "relationships": [],
+        }
+
+        report = validate_temporal_consistency(graph)
+
+        self.assertIsInstance(report, TemporalConsistencyReport)
+
+    def test_query_temporal_pattern_sequence_returns_patterns(self):
+        graph = {
+            "relationships": [
+                {"id": "s1", "source": "A", "target": "B", "type": "rel", "valid_from": "2024-01-01", "valid_until": "2024-01-02"},
+                {"id": "s2", "source": "B", "target": "C", "type": "rel", "valid_from": "2024-01-02", "valid_until": "2024-01-03"},
+            ]
+        }
+
+        result = self.query_engine.query_temporal_pattern(graph, "sequence")
+
+        self.assertGreaterEqual(result["num_patterns"], 1)
+        self.assertEqual(result["patterns"][0]["pattern_type"], "sequence")
+
+    def test_query_temporal_pattern_sequence_supports_gap_tolerance(self):
+        query_engine = __import__("semantica.kg.temporal_query", fromlist=["TemporalGraphQuery"]).TemporalGraphQuery(
+            pattern_detection={"gap_tolerance": 1}
+        )
+        graph = {
+            "relationships": [
+                {"id": "s1", "source": "A", "target": "B", "type": "rel", "valid_from": "2024-01-01", "valid_until": "2024-01-02"},
+                {"id": "s2", "source": "B", "target": "C", "type": "rel", "valid_from": "2024-01-03", "valid_until": "2024-01-04"},
+            ]
+        }
+
+        result = query_engine.query_temporal_pattern(graph, "sequence")
+
+        self.assertGreaterEqual(result["num_patterns"], 1)
+
+    def test_query_temporal_pattern_sequence_handles_open_ended_relationships(self):
+        graph = {
+            "relationships": [
+                {"id": "s1", "source": "A", "target": "B", "type": "rel", "valid_from": "2024-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": "s2", "source": "B", "target": "C", "type": "rel", "valid_from": "2024-01-03", "valid_until": "2024-01-04"},
+            ]
+        }
+
+        result = self.query_engine.query_temporal_pattern(graph, "sequence")
+
+        self.assertEqual(result["patterns"], [])
+
+    def test_query_temporal_pattern_cycle_returns_single_node_cycle(self):
+        graph = {
+            "relationships": [
+                {"id": "c1", "source": "A", "target": "A", "type": "loop", "valid_from": "2024-01-01", "valid_until": "2024-01-02"},
+            ]
+        }
+
+        result = self.query_engine.query_temporal_pattern(graph, "cycle")
+
+        self.assertGreaterEqual(result["num_patterns"], 1)
+        self.assertEqual(result["patterns"][0]["pattern_type"], "cycle")
+
+    def test_query_temporal_pattern_cycle_handles_open_ended_relationships(self):
+        graph = {
+            "relationships": [
+                {"id": "c1", "source": "A", "target": "B", "type": "rel", "valid_from": "2024-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": "c2", "source": "B", "target": "A", "type": "rel", "valid_from": "2024-01-02", "valid_until": "2024-01-03"},
+            ]
+        }
+
+        result = self.query_engine.query_temporal_pattern(graph, "cycle")
+
+        self.assertIsInstance(result["patterns"], list)
+
+    def test_query_time_range_evolution_buckets_by_granularity(self):
+        query_engine = __import__("semantica.kg.temporal_query", fromlist=["TemporalGraphQuery"]).TemporalGraphQuery(
+            temporal_granularity="month"
+        )
+        graph = {
+            "relationships": [
+                {"id": "jan", "source": "A", "target": "B", "type": "rel", "valid_from": "2024-01-10", "valid_until": "2024-01-20"},
+                {"id": "feb", "source": "B", "target": "C", "type": "rel", "valid_from": "2024-02-05", "valid_until": "2024-02-10"},
+            ]
+        }
+
+        result = query_engine.query_time_range(
+            graph,
+            "",
+            "2024-01-01",
+            "2024-02-28",
+            temporal_aggregation="evolution",
+        )
+
+        self.assertIsInstance(result["relationships"], list)
+        self.assertIsInstance(result["relationship_buckets"], dict)
+        self.assertIn("2024-01", result["relationship_buckets"])
+        self.assertIn("2024-02", result["relationship_buckets"])
+
+    def test_find_temporal_paths_respects_strict_and_loose_causal_ordering(self):
+        graph = {
+            "relationships": [
+                {"source": "A", "target": "B", "type": "ab", "valid_from": "2020-01-01", "valid_until": "2022-01-01"},
+                {"source": "B", "target": "C", "type": "bc", "valid_from": "2019-01-01", "valid_until": "2021-01-01"},
+            ]
+        }
+
+        strict_result = self.query_engine.find_temporal_paths(graph, "A", "C")
+        loose_result = self.query_engine.find_temporal_paths(
+            graph,
+            "A",
+            "C",
+            ordering_strategy="loose",
+        )
+
+        self.assertEqual(strict_result["num_paths"], 0)
+        self.assertEqual(loose_result["num_paths"], 1)
+
+    def test_reconstruct_at_time_preserves_relationships_with_mixed_id_types(self):
+        graph = {
+            "entities": [
+                {"id": 1, "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+                {"id": 2, "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+            "relationships": [
+                {"source": "1", "target": "2", "type": "rel", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
+            ],
+        }
+
+        reconstructed = self.query_engine.reconstruct_at_time(graph, "2024-01-01")
+
+        self.assertEqual(len(reconstructed["relationships"]), 1)
 
 if __name__ == "__main__":
     unittest.main()
