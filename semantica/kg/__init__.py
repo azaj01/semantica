@@ -126,6 +126,7 @@ from .temporal_query import (
     TemporalPatternDetector,
     TemporalVersionManager,
 )
+from .temporal_model import BiTemporalFact, TemporalBound
 
 __all__ = [
     # Core Classes
@@ -137,6 +138,8 @@ __all__ = [
     "TemporalGraphQuery",
     "TemporalPatternDetector",
     "TemporalVersionManager",
+    "TemporalBound",
+    "BiTemporalFact",
     "AlgorithmTrackerWithProvenance",
     "ProvenanceTracker",
     # Enhanced Graph Algorithms

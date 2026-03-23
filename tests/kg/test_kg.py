@@ -1,13 +1,17 @@
 import unittest
+import warnings
 from unittest.mock import MagicMock, patch
 import sys
 import os
+from datetime import datetime, timezone
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from semantica.kg.graph_builder import GraphBuilder
 from semantica.kg.graph_analyzer import GraphAnalyzer
+from semantica.kg.temporal_model import TemporalBound, deserialize_relationship_temporal_fields
+from semantica.utils.exceptions import TemporalValidationError
 
 class TestGraphBuilder(unittest.TestCase):
     def setUp(self):
@@ -316,6 +320,76 @@ class TestTemporalGraphQuery(unittest.TestCase):
         )
         self.assertEqual(result["num_paths"], 1)
         self.assertEqual(len(result["paths"][0]["path"]), 3) # A, B, C
+
+    def test_parse_time_normalizes_equivalent_dates_and_utc(self):
+        parsed_a = self.query_engine._parse_time("2024-1-1")
+        parsed_b = self.query_engine._parse_time("2024-01-01")
+        parsed_c = self.query_engine._parse_time("2024-06-15T10:00:00+05:30")
+
+        self.assertEqual(parsed_a, parsed_b)
+        self.assertEqual(parsed_c, datetime(2024, 6, 15, 4, 30, tzinfo=timezone.utc))
+
+    def test_parse_time_invalid_raises_temporal_validation_error(self):
+        with self.assertRaises(TemporalValidationError):
+            self.query_engine._parse_time("not-a-date")
+
+    def test_query_at_time_supports_open_bound_and_none_warning(self):
+        graph = {
+            "relationships": [
+                {
+                    "source": "1",
+                    "target": "2",
+                    "type": "current",
+                    "valid_from": "2024-01-01",
+                    "valid_until": TemporalBound.OPEN,
+                },
+                {
+                    "source": "2",
+                    "target": "3",
+                    "type": "deprecated-none",
+                    "valid_from": "2024-01-01",
+                    "valid_until": None,
+                },
+            ]
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = self.query_engine.query_at_time(graph, "", "2026-01-01")
+
+        self.assertEqual(len(result["relationships"]), 2)
+        self.assertTrue(any(item.category is DeprecationWarning for item in caught))
+
+    def test_query_at_time_supports_transaction_axis(self):
+        graph = {
+            "relationships": [
+                {
+                    "source": "1",
+                    "target": "2",
+                    "type": "known-later",
+                    "valid_from": "2019-01-01",
+                    "valid_until": TemporalBound.OPEN,
+                    "recorded_at": "2021-01-01",
+                    "superseded_at": TemporalBound.OPEN,
+                }
+            ]
+        }
+
+        result_2020 = self.query_engine.query_at_time(
+            graph, "", "2020-06-01", time_axis="transaction"
+        )
+        result_2021 = self.query_engine.query_at_time(
+            graph, "", "2021-06-01", time_axis="transaction"
+        )
+
+        self.assertEqual(len(result_2020["relationships"]), 0)
+        self.assertEqual(len(result_2021["relationships"]), 1)
+
+    def test_null_valid_until_deserializes_to_open(self):
+        relationship = deserialize_relationship_temporal_fields(
+            {"source": "1", "target": "2", "type": "rel", "valid_from": "2024-01-01", "valid_until": None}
+        )
+        self.assertIs(relationship["valid_until"], TemporalBound.OPEN)
 
 if __name__ == "__main__":
     unittest.main()

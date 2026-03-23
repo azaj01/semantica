@@ -8,7 +8,9 @@ graphs, including persistent storage, detailed change tracking, and audit trails
 import os
 import tempfile
 import pytest
+from datetime import datetime, timezone
 from semantica.kg.temporal_query import TemporalVersionManager
+from semantica.kg.temporal_model import TemporalBound
 from semantica.change_management import ChangeLogEntry, InMemoryVersionStorage, SQLiteVersionStorage
 from semantica.utils.exceptions import ValidationError, ProcessingError
 
@@ -234,6 +236,50 @@ class TestTemporalVersionManager:
         
         with pytest.raises(ValidationError, match="Version not found: nonexistent"):
             manager.compare_versions("v1.0", "nonexistent")
+
+    def test_apply_revision_preserves_history_and_revises_valid_time(self):
+        manager = TemporalVersionManager()
+        snapshot = manager.create_snapshot(
+            graph={
+                "entities": [],
+                "relationships": [
+                    {
+                        "id": "fact-1",
+                        "source": "drug_a",
+                        "target": "drug_b",
+                        "type": "interacts_with",
+                        "valid_from": "2021-01-01",
+                        "valid_until": TemporalBound.OPEN,
+                    }
+                ],
+            },
+            version_label="v1.0",
+            author="alice@company.com",
+            description="Initial version",
+        )
+
+        revised = manager.apply_revision(
+            snapshot,
+            {
+                "fact_ids": ["fact-1"],
+                "new_valid_from": "2019-01-01",
+                "new_valid_until": None,
+                "revision_type": "retroactive",
+                "author": "alice@company.com",
+                "reason": "Backfilled evidence",
+            },
+        )
+
+        query_engine = __import__("semantica.kg.temporal_query", fromlist=["TemporalGraphQuery"]).TemporalGraphQuery()
+        result = query_engine.query_at_time(revised, "", "2020-06-01")
+
+        assert len(result["relationships"]) == 1
+        assert result["relationships"][0]["id"].startswith("fact-1__rev__")
+
+        original = manager.get_version("v1.0")
+        assert original is not None
+        assert manager.get_version(revised["label"]) is not None
+        assert len(manager.list_versions()) == 2
     
     def test_detailed_entity_diff(self):
         """Test detailed entity-level differences."""

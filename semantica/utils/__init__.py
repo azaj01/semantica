@@ -63,6 +63,7 @@ from .exceptions import (
     ProcessingError,
     QualityError,
     SemanticaError,
+    TemporalValidationError,
     ValidationError,
     format_exception,
     handle_exception,
@@ -158,6 +159,7 @@ __all__ = [
     # Exceptions
     "SemanticaError",
     "ValidationError",
+    "TemporalValidationError",
     "ProcessingError",
     "ConfigurationError",
     "QualityError",

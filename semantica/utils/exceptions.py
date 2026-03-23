@@ -152,6 +152,21 @@ class ValidationError(SemanticaError):
         self.constraint = details.get("constraint")
 
 
+class TemporalValidationError(ValidationError):
+    """
+    Exception raised for invalid temporal values or inconsistent temporal state.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        temporal_context: Optional[Dict[str, Any]] = None,
+        **details: Any,
+    ):
+        super().__init__(message, validation_context=temporal_context, **details)
+        self.error_code = "SEM001T"
+
+
 class ProcessingError(SemanticaError):
     """
     Exception raised for data processing errors.

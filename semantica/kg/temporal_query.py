@@ -1,36 +1,24 @@
 """
 Temporal Query Module
-
-This module provides comprehensive time-aware querying capabilities for the
-Semantica framework, enabling temporal queries and analysis on knowledge
-graphs with temporal information.
-
-Key Features:
-    - Time-point queries (query graph at specific time)
-    - Time-range queries (query within time intervals)
-    - Temporal pattern detection (sequences, cycles, trends)
-    - Graph evolution analysis
-    - Temporal path finding
-    - Temporal version management
-
-Main Classes:
-    - TemporalGraphQuery: Main temporal query engine
-    - TemporalPatternDetector: Temporal pattern detection engine
-    - TemporalVersionManager: Temporal version/snapshot management
-
-Example Usage:
-    >>> from semantica.kg import TemporalGraphQuery
-    >>> query_engine = TemporalGraphQuery()
-    >>> result = query_engine.query_at_time(graph, query, at_time="2024-01-01")
-    >>> evolution = query_engine.analyze_evolution(graph, start_time="2024-01-01")
-
-Author: Semantica Contributors
-License: MIT
 """
 
+import copy
+import warnings
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..utils.progress_tracker import get_progress_tracker
+from .temporal_model import (
+    BiTemporalFact,
+    TemporalBound,
+    deserialize_relationship_temporal_fields,
+    parse_temporal_bound,
+    parse_temporal_value,
+    relationship_to_json_ready,
+    serialize_temporal_value,
+    temporal_structure_to_json_ready,
+)
+from ..utils.exceptions import ProcessingError, TemporalValidationError
 
 
 class TemporalGraphQuery:
@@ -105,6 +93,7 @@ class TemporalGraphQuery:
         at_time: Any,
         include_history: bool = False,
         temporal_precision: Optional[str] = None,
+        time_axis: str = "valid",
         **options,
     ) -> Dict[str, Any]:
         """
@@ -141,16 +130,8 @@ class TemporalGraphQuery:
         relationships = []
         if "relationships" in graph:
             for rel in graph.get("relationships", []):
-                valid_from = self._parse_time(rel.get("valid_from"))
-                valid_until = self._parse_time(rel.get("valid_until"))
-
-                # Check if relationship is valid at query time
-                if valid_from and self._compare_times(query_time, valid_from) < 0:
-                    continue
-                if valid_until and self._compare_times(query_time, valid_until) > 0:
-                    continue
-
-                relationships.append(rel)
+                if self._relationship_active_at_time(rel, query_time, time_axis=time_axis):
+                    relationships.append(rel)
 
         # Get entities
         entities = graph.get("entities", [])
@@ -177,6 +158,7 @@ class TemporalGraphQuery:
         end_time: Any,
         temporal_aggregation: str = "union",
         include_intervals: bool = True,
+        time_axis: str = "valid",
         **options,
     ) -> Dict[str, Any]:
         """
@@ -216,16 +198,13 @@ class TemporalGraphQuery:
         relationships = []
         if "relationships" in graph:
             for rel in graph.get("relationships", []):
-                valid_from = self._parse_time(rel.get("valid_from"))
-                valid_until = self._parse_time(rel.get("valid_until"))
-
-                # Check if relationship overlaps with time range
-                if valid_from and self._compare_times(end, valid_from) < 0:
-                    continue
-                if valid_until and self._compare_times(start, valid_until) > 0:
-                    continue
-
-                relationships.append(rel)
+                if self._relationship_overlaps_range(
+                    rel,
+                    start,
+                    end,
+                    time_axis=time_axis,
+                ):
+                    relationships.append(rel)
 
         # Aggregate based on strategy
         if temporal_aggregation == "intersection":
@@ -233,11 +212,7 @@ class TemporalGraphQuery:
             relationships = [
                 rel
                 for rel in relationships
-                if self._parse_time(rel.get("valid_from")) <= start
-                and (
-                    not rel.get("valid_until")
-                    or self._parse_time(rel.get("valid_until")) >= end
-                )
+                if self._relationship_covers_range(rel, start, end, time_axis=time_axis)
             ]
         elif temporal_aggregation == "evolution":
             # Group by time periods
@@ -448,6 +423,8 @@ class TemporalGraphQuery:
         # Build adjacency with temporal constraints
         adjacency = {}
         relationships = graph.get("relationships", [])
+        parsed_start_time = self._parse_time(start_time) if start_time else None
+        parsed_end_time = self._parse_time(end_time) if end_time else None
 
         for rel in relationships:
             s = rel.get("source")
@@ -459,15 +436,15 @@ class TemporalGraphQuery:
                 valid_until = self._parse_time(rel.get("valid_until"))
 
                 if (
-                    start_time
+                    parsed_start_time
                     and valid_until
-                    and self._compare_times(valid_until, start_time) < 0
+                    and self._compare_times(valid_until, parsed_start_time) < 0
                 ):
                     continue
                 if (
-                    end_time
+                    parsed_end_time
                     and valid_from
-                    and self._compare_times(valid_from, end_time) > 0
+                    and self._compare_times(valid_from, parsed_end_time) > 0
                 ):
                     continue
 
@@ -509,25 +486,94 @@ class TemporalGraphQuery:
         }
 
     def _parse_time(self, time_value):
-        """Parse time value."""
-        from datetime import datetime
-
-        if time_value is None:
-            return None
-
-        if isinstance(time_value, str):
-            return time_value
-
-        if isinstance(time_value, datetime):
-            return time_value.isoformat()
-
-        return str(time_value)
+        """Parse time value into a UTC-normalized datetime."""
+        try:
+            return parse_temporal_value(time_value)
+        except TemporalValidationError:
+            raise
+        except Exception as exc:
+            raise TemporalValidationError(
+                "Invalid temporal value",
+                temporal_context={"value": time_value},
+            ) from exc
 
     def _compare_times(self, time1, time2):
-        """Compare two time strings."""
+        """Compare two UTC datetimes after granularity truncation."""
         if time1 is None or time2 is None:
             return 0
+        time1 = self._truncate_to_granularity(time1)
+        time2 = self._truncate_to_granularity(time2)
         return (time1 > time2) - (time1 < time2)
+
+    def _truncate_to_granularity(self, value: datetime) -> datetime:
+        granularity = getattr(self, "temporal_granularity", "second")
+        if granularity == "second":
+            return value.replace(microsecond=0)
+        if granularity == "minute":
+            return value.replace(second=0, microsecond=0)
+        if granularity == "hour":
+            return value.replace(minute=0, second=0, microsecond=0)
+        if granularity == "day":
+            return value.replace(hour=0, minute=0, second=0, microsecond=0)
+        if granularity == "week":
+            start_of_week = value - timedelta(days=value.weekday())
+            return start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+        if granularity == "month":
+            return value.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if granularity == "year":
+            return value.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return value
+
+    def _get_axis_bounds(self, relationship: Dict[str, Any], axis: str):
+        normalized = deserialize_relationship_temporal_fields(relationship)
+        fact = BiTemporalFact.from_relationship(normalized)
+        if axis == "valid":
+            return fact.valid_from, fact.valid_until
+        if axis == "transaction":
+            return fact.recorded_at, fact.superseded_at
+        raise ValueError(f"Unsupported time axis: {axis}")
+
+    def _is_point_in_bounds(self, point: datetime, start: Optional[datetime], end: Optional[datetime | TemporalBound]) -> bool:
+        if start and self._compare_times(point, start) < 0:
+            return False
+        if isinstance(end, datetime) and self._compare_times(point, end) > 0:
+            return False
+        return True
+
+    def _range_overlaps_bounds(self, query_start: datetime, query_end: datetime, start: Optional[datetime], end: Optional[datetime | TemporalBound]) -> bool:
+        if start and self._compare_times(query_end, start) < 0:
+            return False
+        if isinstance(end, datetime) and self._compare_times(query_start, end) > 0:
+            return False
+        return True
+
+    def _range_covered_by_bounds(self, query_start: datetime, query_end: datetime, start: Optional[datetime], end: Optional[datetime | TemporalBound]) -> bool:
+        if start and self._compare_times(start, query_start) > 0:
+            return False
+        if isinstance(end, datetime) and self._compare_times(end, query_end) < 0:
+            return False
+        return True
+
+    def _relationship_active_at_time(self, relationship: Dict[str, Any], query_time: datetime, *, time_axis: str) -> bool:
+        axes = ["valid", "transaction"] if time_axis == "both" else [time_axis]
+        return all(
+            self._is_point_in_bounds(query_time, *self._get_axis_bounds(relationship, axis))
+            for axis in axes
+        )
+
+    def _relationship_overlaps_range(self, relationship: Dict[str, Any], start: datetime, end: datetime, *, time_axis: str) -> bool:
+        axes = ["valid", "transaction"] if time_axis == "both" else [time_axis]
+        return all(
+            self._range_overlaps_bounds(start, end, *self._get_axis_bounds(relationship, axis))
+            for axis in axes
+        )
+
+    def _relationship_covers_range(self, relationship: Dict[str, Any], start: datetime, end: datetime, *, time_axis: str) -> bool:
+        axes = ["valid", "transaction"] if time_axis == "both" else [time_axis]
+        return all(
+            self._range_covered_by_bounds(start, end, *self._get_axis_bounds(relationship, axis))
+            for axis in axes
+        )
 
     def _group_by_time_periods(self, relationships, start, end):
         """Group relationships by time periods."""
@@ -848,7 +894,10 @@ class TemporalVersionManager:
             "author": change_entry.author,
             "description": change_entry.description,
             "entities": graph.get("entities", []).copy(),
-            "relationships": graph.get("relationships", []).copy(),
+            "relationships": [
+                relationship_to_json_ready(rel)
+                for rel in graph.get("relationships", []).copy()
+            ],
             "metadata": options.get("metadata", {})
         }
         
@@ -856,10 +905,107 @@ class TemporalVersionManager:
         snapshot["checksum"] = compute_checksum(snapshot)
         
         # Store snapshot
-        self.storage.save(snapshot)
+        try:
+            self.storage.save(snapshot)
+        except Exception as exc:
+            raise ProcessingError(
+                "Failed to persist snapshot",
+                processing_context={"label": version_label, "author": author},
+            ) from exc
         
         self.logger.info(f"Created snapshot '{version_label}' by {author}")
         return snapshot
+
+    def apply_revision(self, snapshot: Dict[str, Any], revision: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Apply a temporal revision without deleting the original facts.
+
+        Design note:
+        Overlapping retroactive revisions against the same fact are handled by
+        superseding the latest matching version and emitting a warning when the
+        newly requested valid window overlaps a sibling fact on the same edge
+        and relationship type. This preserves all prior versions instead of
+        trying to collapse them into a single mutable record.
+        """
+        revision_time = datetime.now(timezone.utc)
+        relationships = copy.deepcopy(snapshot.get("relationships", []))
+        fact_ids = set(revision.get("fact_ids", []))
+        new_valid_from = parse_temporal_value(revision.get("new_valid_from"))
+        new_valid_until = parse_temporal_bound(revision.get("new_valid_until"), default=TemporalBound.OPEN)
+        revision_type = revision.get("revision_type", "correction")
+
+        revised_relationships = []
+        provenance_event = {
+            "type": "temporal_revision",
+            "revision_type": revision_type,
+            "author": revision.get("author"),
+            "reason": revision.get("reason"),
+            "recorded_at": serialize_temporal_value(revision_time),
+            "fact_ids": list(fact_ids),
+        }
+
+        for rel in relationships:
+            rel_id = rel.get("id") or self._relationship_key(rel)
+            if rel_id not in fact_ids:
+                revised_relationships.append(rel)
+                continue
+
+            original = deserialize_relationship_temporal_fields(rel)
+            original["id"] = rel_id
+            original["superseded_at"] = serialize_temporal_value(revision_time)
+            original.setdefault("provenance", []).append(
+                {
+                    **provenance_event,
+                    "role": "superseded",
+                }
+            )
+            revised_relationships.append(original)
+
+            replacement = copy.deepcopy(rel)
+            replacement["id"] = f"{rel_id}__rev__{int(revision_time.timestamp())}"
+            replacement["valid_from"] = serialize_temporal_value(new_valid_from)
+            replacement["valid_until"] = (
+                TemporalBound.OPEN if new_valid_until is TemporalBound.OPEN else serialize_temporal_value(new_valid_until)
+            )
+            replacement["recorded_at"] = serialize_temporal_value(revision_time)
+            replacement["superseded_at"] = TemporalBound.OPEN
+            replacement.setdefault("provenance", []).append(
+                {
+                    **provenance_event,
+                    "role": "replacement",
+                    "replaces": rel_id,
+                }
+            )
+            self._warn_on_retroactive_overlap(replacement, relationships, revision_type)
+            revised_relationships.append(replacement)
+
+        revised_snapshot = copy.deepcopy(snapshot)
+        revised_snapshot["relationships"] = [
+            relationship_to_json_ready(rel) for rel in revised_relationships
+        ]
+        base_label = snapshot.get("label", "snapshot")
+        original_label = base_label
+        revised_label = f"{base_label}__revision__{int(revision_time.timestamp())}"
+
+        original_snapshot = copy.deepcopy(snapshot)
+        original_snapshot["label"] = original_label
+        original_snapshot_inserted = False
+        if self.storage.get(original_label) is None:
+            self.storage.save(original_snapshot)
+            original_snapshot_inserted = True
+
+        revised_snapshot["label"] = revised_label
+        revised_snapshot.setdefault("metadata", {})["revision_event"] = temporal_structure_to_json_ready(provenance_event)
+        try:
+            self.storage.save(revised_snapshot)
+        except Exception as exc:
+            if original_snapshot_inserted:
+                self.storage.delete(original_label)
+            raise ProcessingError(
+                "Failed to persist revised snapshot",
+                processing_context={"original_label": original_label, "revised_label": revised_label},
+            ) from exc
+        return revised_snapshot
     
     def list_versions(self) -> List[Dict[str, Any]]:
         """
@@ -971,6 +1117,38 @@ class TemporalVersionManager:
         target = relationship.get("target", "")
         rel_type = relationship.get("type", relationship.get("relationship", ""))
         return f"{source}|{rel_type}|{target}"
+
+    def _warn_on_retroactive_overlap(
+        self,
+        replacement: Dict[str, Any],
+        relationships: List[Dict[str, Any]],
+        revision_type: str,
+    ) -> None:
+        if revision_type != "retroactive":
+            return
+
+        query = TemporalGraphQuery(temporal_granularity="second")
+        candidate_start, candidate_end = query._get_axis_bounds(replacement, "valid")
+        for sibling in relationships:
+            if sibling.get("source") != replacement.get("source"):
+                continue
+            if sibling.get("target") != replacement.get("target"):
+                continue
+            if sibling.get("type") != replacement.get("type"):
+                continue
+            sibling_start, sibling_end = query._get_axis_bounds(sibling, "valid")
+            if query._range_overlaps_bounds(
+                candidate_start or datetime.min.replace(tzinfo=timezone.utc),
+                candidate_end if isinstance(candidate_end, datetime) else datetime.max.replace(tzinfo=timezone.utc),
+                sibling_start,
+                sibling_end,
+            ):
+                warnings.warn(
+                    "Retroactive revision overlaps an existing fact on the same edge.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return
     
     def _compute_entity_changes(self, entity1: Dict[str, Any], entity2: Dict[str, Any]) -> Dict[str, Any]:
         """
