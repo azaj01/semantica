@@ -122,7 +122,12 @@ from .cache import ExtractionCache
 from .config import config
 
 try:
-    from .schemas import EntitiesResponse, RelationsResponse, TripletsResponse
+    from .schemas import (
+        EntitiesResponse,
+        RelationsResponse,
+        RelationsWithTemporalResponse,
+        TripletsResponse,
+    )
     SCHEMAS_AVAILABLE = True
 except ImportError:
     SCHEMAS_AVAILABLE = False
@@ -1664,11 +1669,12 @@ def extract_relations_llm(
     max_text_length: Optional[int] = None,
     structured_output_mode: str = "typed",
     max_retries: int = 3,
+    extract_temporal_bounds: bool = False,
     **kwargs,
 ) -> List[Relation]:
     """
     LLM-based relation extraction.
-    
+
     Args:
         text: Input text
         entities: Pre-extracted entities
@@ -1677,6 +1683,10 @@ def extract_relations_llm(
         silent_fail: If True, return empty list on error. If False (default), raise exception.
         max_text_length: Maximum text length before auto-chunking. None = provider default.
         max_retries: Maximum number of retries for LLM calls (default: 3)
+        extract_temporal_bounds: If True, extend the prompt to extract temporal validity
+            per relation. Each relation's metadata gains: valid_from, valid_until,
+            temporal_confidence (0.0–1.0), and temporal_source_text. Low confidence (<0.5)
+            produces a warning log but is not suppressed. Default False.
         **kwargs: Additional options
     """
     # Support llm_model parameter to disambiguate from ML model
@@ -1691,6 +1701,7 @@ def extract_relations_llm(
         "structured_output_mode": structured_output_mode,
         "max_retries": max_retries,
         "relation_types": kwargs.get("relation_types"),
+        "extract_temporal_bounds": extract_temporal_bounds,
         # Include entities hash/str in cache key implicitly via **cache_params
         "entities_hash": hash(tuple(sorted([e.text for e in entities]))) if entities else 0
     }
@@ -1759,9 +1770,10 @@ def extract_relations_llm(
     if len(text) > max_text_length:
         logger.info(f"Text length ({len(text)}) exceeds limit for relations. Chunking...")
         return _extract_relations_chunked(
-            text, entities, provider=provider, model=model, 
-            silent_fail=silent_fail, max_text_length=max_text_length, 
+            text, entities, provider=provider, model=model,
+            silent_fail=silent_fail, max_text_length=max_text_length,
             max_retries=max_retries,
+            extract_temporal_bounds=extract_temporal_bounds,
             **kwargs
         )
 
@@ -1777,7 +1789,7 @@ def extract_relations_llm(
         )
 
     entities_str = ", ".join([f"{e.text} ({e.label})" for e in prompt_entities])
-    
+
     # Use custom relation types if provided
     relation_types = kwargs.get("relation_types")
     if relation_types:
@@ -1790,16 +1802,18 @@ If a relation doesn't fit any of the preferred types, use the most appropriate t
         relation_types_instruction = """
 Extract meaningful relationships between entities. Use appropriate relation types that accurately describe how entities are connected.
 Common relation types include: related_to, part_of, located_in, created_by, uses, depends_on, interacts_with, and similar variations."""
-    
+
     verbose_mode = kwargs.get("verbose", False)
     if verbose_mode:
         import sys
         print(f"    [methods.extract_relations_llm] Constructing prompt for {len(prompt_entities)} entities...", flush=True, file=sys.stdout)
-    
+
     if not SCHEMAS_AVAILABLE:
         raise ImportError("Pydantic schemas not available. Install pydantic/instructor to use LLM extraction.")
 
-    prompt = f"""Extract relations between entities from the provided text.
+    # ── Base prompt (always included) ───────────────────────────────────────
+    if not extract_temporal_bounds:
+        prompt = f"""Extract relations between entities from the provided text.
 Return the result as a JSON object with a "relations" key containing the list of relations.
 Each relation must have 'subject', 'predicate', and 'object' fields.
 
@@ -1820,115 +1834,59 @@ Instructions:
 Text to extract from:
 {text}
 Entities found in text: {entities_str}"""
-
-
-    if not entities:
-        error_msg = "No entities provided for relation extraction. Relations require existing entities."
-        logger.error(error_msg)
-        if not silent_fail:
-            raise ProcessingError(error_msg)
-        return []
-
-    # Pass api_key if provided in kwargs
-    provider_kwargs = kwargs.copy()
-    
-    # Check if api_key is provided but empty, or not provided at all
-    if "api_key" not in provider_kwargs or not provider_kwargs["api_key"]:
-        import os
-        env_key = f"{provider.upper()}_API_KEY"
-        api_key = os.getenv(env_key)
-        if api_key:
-            provider_kwargs["api_key"] = api_key
-            
-    # Remove None/empty API key if still present to avoid provider errors
-    if "api_key" in provider_kwargs and not provider_kwargs["api_key"]:
-        del provider_kwargs["api_key"]
-
-    # 2. PROVIDER VALIDATION
-    try:
-        llm = create_provider(provider, model=model, **provider_kwargs)
-        if not llm.is_available():
-            error_msg = f"{provider} provider not available for relation extraction (key missing?)."
-            logger.error(error_msg)
-            if not silent_fail:
-                raise ProcessingError(error_msg)
-            return []
-    except Exception as e:
-        error_msg = f"Failed to create {provider} provider for relations: {e}"
-        logger.error(error_msg)
-        if not silent_fail:
-            raise ProcessingError(error_msg) from e
-        return []
-
-    # 3. TEXT LENGTH CHECK AND CHUNKING
-    if max_text_length is None:
-        # Default limits for chunking only - NOT for LLM generation
-        max_text_length = {
-            "groq": 64000,
-            "openai": 64000,
-            "gemini": 64000,
-            "anthropic": 64000,
-            "deepseek": 64000,
-        }.get(provider.lower(), 32000)
-    
-    if len(text) > max_text_length:
-        logger.info(f"Text length ({len(text)}) exceeds limit for relations. Chunking...")
-        return _extract_relations_chunked(
-            text, entities, provider=provider, model=model, 
-            silent_fail=silent_fail, max_text_length=max_text_length, 
-            max_retries=max_retries,
-            **kwargs
-        )
-
-    original_entities = entities
-    # Use a fixed internal default for prompt entity cap (do not accept overrides from kwargs)
-    max_entities_prompt = 80
-    prompt_entities = original_entities
-    if max_entities_prompt > 0 and len(original_entities) > max_entities_prompt:
-        prompt_entities = filter_entities_for_text(
-            text,
-            original_entities,
-            max_keep=max_entities_prompt,
-        )
-
-    entities_str = ", ".join([f"{e.text} ({e.label})" for e in prompt_entities])
-    
-    # Use custom relation types if provided
-    relation_types = kwargs.get("relation_types")
-    if relation_types:
-        relation_types_str = ", ".join(relation_types)
-        relation_types_instruction = f"""
-Preferred relation types: {relation_types_str}.
-You may also use related or similar relation types if they better capture the relationship (e.g., variations, synonyms, or domain-specific relations).
-If a relation doesn't fit any of the preferred types, use the most appropriate type from the preferred list or a closely related type that accurately describes the relationship."""
     else:
-        relation_types_instruction = """
-Extract meaningful relationships between entities. Use appropriate relation types that accurately describe how entities are connected.
-Common relation types include: related_to, part_of, located_in, created_by, uses, depends_on, interacts_with, and similar variations."""
-    
-    verbose_mode = kwargs.get("verbose", False)
-    if verbose_mode:
-        import sys
-        print(f"    [methods.extract_relations_llm] Constructing prompt for {len(prompt_entities)} entities...", flush=True, file=sys.stdout)
-    
-    if not SCHEMAS_AVAILABLE:
-        raise ImportError("Pydantic schemas not available. Install pydantic/instructor to use LLM extraction.")
+        # ── Temporal-extended prompt ─────────────────────────────────────────
+        prompt = f"""Extract relations between entities from the provided text, along with temporal validity information for each relation.
+Return the result as a JSON object with a "relations" key. Each relation must have:
+'subject', 'predicate', 'object', 'confidence', 'valid_from', 'valid_until', 'temporal_confidence', 'temporal_source_text'.
 
-    prompt = f"""Extract relations between entities from the provided text.
-Return the result as a JSON object with a "relations" key containing the list of relations.
-Each relation must have 'subject', 'predicate', and 'object' fields.
+TEMPORAL EXTRACTION RULES:
+- valid_from: ISO 8601 date or exact phrase from the text for when this relation became valid. Set to null if no temporal signal is present.
+- valid_until: ISO 8601 date or exact phrase for when this relation ceased. Set to null if open-ended or absent.
+- temporal_confidence (float 0.0–1.0) — calibrated as follows:
+    1.00 = full ISO date ("2022-03-15", "March 15, 2022")
+    0.90 = explicit year + month ("March 2022", "2022-03")
+    0.85 = explicit year only ("in 2022", "since 2021", "from 2019")
+    0.75 = quarter ("Q3 2023", "Q2 2021")
+    0.65 = named season or approximate range ("summer 2022", "early 2020s", "mid-2022")
+    0.50 = vague relative with computable anchor ("last year", "three months ago")
+    0.35 = highly vague relative ("recently", "years ago", "in the past")
+    0.00 = no temporal signal present for this relation
+- temporal_source_text: the EXACT verbatim substring from the source text that contains the temporal signal. Set to null when temporal_confidence is 0.0.
 
-Example output (JSON format only):
+IMPORTANT: Do NOT invent or guess dates. If the text contains no temporal signal for a relation, set valid_from and valid_until to null and temporal_confidence to 0.0.
+
+Few-shot examples (do NOT include these in your output):
+  Text: "Apple acquired Beats in May 2014."
+  → valid_from: "2014-05-01", valid_until: null, temporal_confidence: 0.90, temporal_source_text: "May 2014"
+
+  Text: "The CEO has led the company since Q3 2020."
+  → valid_from: "Q3 2020", valid_until: null, temporal_confidence: 0.75, temporal_source_text: "since Q3 2020"
+
+  Text: "Last year, Google partnered with Samsung."
+  → valid_from: "last year", valid_until: null, temporal_confidence: 0.50, temporal_source_text: "Last year"
+
+  Text: "The firm was under enhanced supervision between Q2 and Q4 2021."
+  → valid_from: "Q2 2021", valid_until: "Q4 2021", temporal_confidence: 0.75, temporal_source_text: "between Q2 and Q4 2021"
+
+  Text: "Microsoft develops Windows."
+  → valid_from: null, valid_until: null, temporal_confidence: 0.00, temporal_source_text: null
+
+Example JSON output format:
 {{
   "relations": [
-    {{"subject": "Entity A", "predicate": "related_to", "object": "Entity B", "confidence": 0.95}},
-    {{"subject": "Subject Entity", "predicate": "action_verb", "object": "Object Entity", "confidence": 0.90}}
+    {{
+      "subject": "Apple", "predicate": "acquired", "object": "Beats",
+      "confidence": 0.97,
+      "valid_from": "2014-05-01", "valid_until": null,
+      "temporal_confidence": 0.90, "temporal_source_text": "May 2014"
+    }}
   ]
 }}
 
 Instructions:
 1. Extract relations ONLY from the text provided below.
-2. Do not include any relations from the example above.
+2. Do not include any relations from the examples above.
 3. Use the provided entities list as a reference for subjects and objects.
 4. {relation_types_instruction}
 
@@ -1938,24 +1896,25 @@ Entities found in text: {entities_str}"""
 
     try:
         # Use typed generation with Pydantic schema
-        # Pass kwargs to allow max_tokens and other parameters to be used
         if verbose_mode:
-             import sys
-             print(f"    [methods.extract_relations_llm] Calling llm.generate_typed ({provider}/{model})...", flush=True, file=sys.stdout)
+            import sys
+            print(f"    [methods.extract_relations_llm] Calling llm.generate_typed ({provider}/{model})...", flush=True, file=sys.stdout)
         # Only forward minimal, safe parameters to provider calls
         call_kwargs = {}
         if "temperature" in kwargs:
             call_kwargs["temperature"] = kwargs["temperature"]
         if "verbose" in kwargs:
             call_kwargs["verbose"] = kwargs["verbose"]
-        
+
         call_kwargs["max_retries"] = max_retries
 
-        result_obj = llm.generate_typed(prompt, schema=RelationsResponse, **call_kwargs)
+        # Select schema based on whether temporal extraction is requested
+        active_schema = RelationsWithTemporalResponse if extract_temporal_bounds else RelationsResponse
+        result_obj = llm.generate_typed(prompt, schema=active_schema, **call_kwargs)
         if verbose_mode:
-             import sys
-             print(f"    [methods.extract_relations_llm] Received response from {provider}.", flush=True, file=sys.stdout)
-        
+            import sys
+            print(f"    [methods.extract_relations_llm] Received response from {provider}.", flush=True, file=sys.stdout)
+
         # Convert back to internal Relation format (robust across providers)
         # Normalize typed result to a plain dict compatible with _parse_relation_result
         try:
@@ -1972,12 +1931,16 @@ Entities found in text: {entities_str}"""
                     elif isinstance(r, dict):
                         rel_items.append(r)
                     else:
-                        # Best-effort attribute access
+                        # Best-effort attribute access — include temporal fields when present
                         rel_items.append({
                             "subject": getattr(r, "subject", ""),
                             "object": getattr(r, "object", ""),
                             "predicate": getattr(r, "predicate", "related_to"),
                             "confidence": getattr(r, "confidence", 0.9),
+                            "valid_from": getattr(r, "valid_from", None),
+                            "valid_until": getattr(r, "valid_until", None),
+                            "temporal_confidence": getattr(r, "temporal_confidence", 0.0),
+                            "temporal_source_text": getattr(r, "temporal_source_text", None),
                         })
                 parsed = {"relations": rel_items}
             else:
@@ -1986,7 +1949,11 @@ Entities found in text: {entities_str}"""
             parsed = result_obj
 
         # Use common parser to build internal Relation objects
-        relations = _parse_relation_result(parsed, original_entities, text, provider, model, extraction_method="llm_typed")
+        relations = _parse_relation_result(
+            parsed, original_entities, text, provider, model,
+            extraction_method="llm_typed",
+            extract_temporal_bounds=extract_temporal_bounds,
+        )
 
         # If typed path returned no relations, attempt a structured JSON fallback
         if not relations:
@@ -1995,7 +1962,11 @@ Entities found in text: {entities_str}"""
                     import sys
                     print("    [methods.extract_relations_llm] Typed result empty, attempting structured JSON fallback...", flush=True, file=sys.stdout)
                 raw_json = llm.generate_structured(prompt, **call_kwargs)
-                relations = _parse_relation_result(raw_json, original_entities, text, provider, model, extraction_method="llm_typed")
+                relations = _parse_relation_result(
+                    raw_json, original_entities, text, provider, model,
+                    extraction_method="llm_typed",
+                    extract_temporal_bounds=extract_temporal_bounds,
+                )
             except Exception as _e:
                 # Keep relations as empty if fallback fails
                 pass
@@ -2003,22 +1974,23 @@ Entities found in text: {entities_str}"""
         logger.info(f"Successfully extracted {len(relations)} relations using {provider}/{model} (typed)")
         _result_cache.set("relations", text, relations, **cache_params)
         return relations
-        
+
     except Exception as e:
         # Check for length/token limit errors
         error_msg_str = str(e).lower()
         if "length" in error_msg_str or "max_tokens" in error_msg_str:
             logger.warning(f"LLM output truncated due to length limit. Reducing chunk size and retrying... ({e})")
-            
+
             # Determine new chunk size (halve it)
             current_max = max_text_length or len(text)
             new_max = current_max // 2
-            
-            if new_max > 100: # Minimum viable chunk size check
+
+            if new_max > 100:  # Minimum viable chunk size check
                 return _extract_relations_chunked(
                     text, entities, provider=provider, model=model,
                     silent_fail=silent_fail, max_text_length=new_max,
                     structured_output_mode=structured_output_mode,
+                    extract_temporal_bounds=extract_temporal_bounds,
                     **kwargs
                 )
 
@@ -2038,11 +2010,12 @@ def _parse_relation_result(
     provider: str,
     model: Optional[str],
     extraction_method: str = "llm",
+    extract_temporal_bounds: bool = False,
 ) -> List[Relation]:
     """Helper to parse raw LLM result into Relation objects."""
     relations = []
     items = []
-    
+
     if isinstance(result, list):
         items = result
     elif isinstance(result, dict):
@@ -2056,13 +2029,13 @@ def _parse_relation_result(
     for item in items:
         if not isinstance(item, dict):
             continue
-            
+
         subject_text = item.get("subject", "")
         object_text = item.get("object", "")
-        
+
         if not subject_text or not object_text:
             continue
-            
+
         # Ensure they are strings
         subject_text = str(subject_text)
         object_text = str(object_text)
@@ -2085,6 +2058,33 @@ def _parse_relation_result(
                 confidence=0.8, metadata={"synthetic": True},
             )
 
+        metadata: dict = {
+            "provider": provider,
+            "model": model,
+            "extraction_method": extraction_method,
+        }
+
+        if extract_temporal_bounds:
+            temporal_confidence = float(item.get("temporal_confidence") or 0.0)
+            valid_from = item.get("valid_from")
+            valid_until = item.get("valid_until")
+            temporal_source_text = item.get("temporal_source_text")
+
+            metadata["valid_from"] = valid_from
+            metadata["valid_until"] = valid_until
+            metadata["temporal_confidence"] = temporal_confidence
+            metadata["temporal_source_text"] = temporal_source_text
+
+            if temporal_confidence < 0.5 and (valid_from is not None or valid_until is not None):
+                logger.warning(
+                    "Low temporal confidence (%.2f) for '%s' (%s → %s). Source: %r",
+                    temporal_confidence,
+                    item.get("predicate", ""),
+                    item.get("subject", ""),
+                    item.get("object", ""),
+                    temporal_source_text,
+                )
+
         relations.append(
             Relation(
                 subject=subject_entity,
@@ -2092,11 +2092,7 @@ def _parse_relation_result(
                 object=object_entity,
                 confidence=item.get("confidence", 0.9),
                 context=text,
-                metadata={
-                    "provider": provider,
-                    "model": model,
-                    "extraction_method": extraction_method,
-                },
+                metadata=metadata,
             )
         )
     return relations
@@ -2111,6 +2107,7 @@ def _extract_relations_chunked(
     max_text_length: int,
     structured_output_mode: str = "typed",
     max_retries: int = 3,
+    extract_temporal_bounds: bool = False,
     **kwargs
 ) -> List[Relation]:
     """Internal helper to extract relations from long text by chunking."""
@@ -2154,6 +2151,7 @@ def _extract_relations_chunked(
                 max_text_length=len(chunk.text) + 1,
                 structured_output_mode=structured_output_mode,
                 max_retries=max_retries,
+                extract_temporal_bounds=extract_temporal_bounds,
                 **limited_kwargs
             )
             future_to_chunk[future] = i

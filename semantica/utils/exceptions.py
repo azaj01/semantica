@@ -167,6 +167,18 @@ class TemporalValidationError(ValidationError):
         self.error_code = "SEM001T"
 
 
+class TemporalAmbiguityWarning(UserWarning):
+    """
+    Warning raised when a temporal expression is ambiguous and cannot be
+    resolved without additional locale or context information.
+
+    Example: "03/04/2022" is ambiguous without knowing whether day-first or
+    month-first ordering applies. Use ``warnings.catch_warnings()`` to handle.
+    """
+
+    pass
+
+
 class ProcessingError(SemanticaError):
     """
     Exception raised for data processing errors.
