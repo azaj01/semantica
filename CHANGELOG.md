@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Temporal Metadata Extraction from Text** (PR #400 by @KaifAhmad1):
+  - Added `extract_temporal_bounds: bool = False` parameter to `extract_relations_llm()`. When `True`, the LLM prompt is extended with a calibrated confidence scale and four few-shot examples; each returned `Relation` gains `valid_from`, `valid_until`, `temporal_confidence` (0.0–1.0), and `temporal_source_text` in its `metadata` dict. Default `False` preserves 100% backward compatibility.
+  - Confidence scale anchors baked into the prompt: `1.00` = full ISO date, `0.90` = year+month, `0.85` = year only, `0.75` = quarter, `0.65` = named season/approximate range, `0.50` = vague relative with computable anchor, `0.35` = highly vague, `0.00` = no temporal signal. LLMs self-report certainty rather than clustering near 1.0.
+  - Low temporal confidence (< 0.5) with a non-null date logs a `WARNING`; signal is never suppressed — callers decide how to filter.
+  - Cache key now includes the `extract_temporal_bounds` flag to prevent cross-mode cache pollution.
+  - Flag propagated through `_extract_relations_chunked()` so long-text chunked extraction also carries temporal metadata.
+  - Added `RelationWithTemporalOut` and `RelationsWithTemporalResponse` Pydantic schemas in `semantica/semantic_extract/schemas.py`. A separate schema is required because `RelationOut` uses `extra="ignore"`, which silently drops any undeclared field including the four temporal fields.
+  - New `semantica/kg/temporal_normalizer.py` — `TemporalNormalizer` class (zero LLM calls, pure regex + `dateutil` arithmetic):
+    - `normalize(value)` → `(valid_from, valid_until)` UTC `datetime` tuple or `None`. Resolution order: ISO 8601 full parse → partial-date regex (year-only, month+year, YYYY-MM, Q[1-4] YYYY) → ambiguous-slash-date detection → domain phrase map → relative phrase resolution via `relativedelta`.
+    - `normalize_phrase(phrase)` → metadata dict `{"maps_to": ..., "type": ..., "domain": [...]}` or `None` — exact match then regex-pattern keys.
+    - Ambiguous `DD/MM/YYYY`-style inputs issue `TemporalAmbiguityWarning` and return `None` — never silently guesses locale.
+    - Unparseable inputs return `None` with a debug log — never raise.
+    - Relative phrases (`"last year"`, `"three months ago"`, etc.) raise `ValueError` if `reference_date` is `None` rather than guessing.
+    - Default phrase map covers 13 domains: General/Policy (`effective date`, `effective from/as of/beginning`, `in force until`, `retroactive to`, `sunset clause`), Healthcare (`approval date`, `expiry date`, `market authorization`), Cybersecurity (`incident window`, `campaign period`), Supply Chain (`certification valid through`), Finance (`trading halt`), Energy (`commissioned date`, `decommissioned date`).
+    - User-supplied `phrase_map` is merged over defaults at construction (`{**defaults, **user_map}`) — custom entries win without forking the library.
+  - Added `TemporalAmbiguityWarning(UserWarning)` to `semantica/utils/exceptions.py`.
+  - Exported `TemporalNormalizer` from `semantica/kg/__init__.py`.
+  - Added 53 new tests in `tests/semantic_extract/test_temporal_extraction.py`; zero real LLM calls, suite runs in ~3.5 s. All 873 existing tests continue to pass.
+
 - **Fix: OllamaProvider ignores `base_url`** (PR #408 by @AlexeyMyslin, fixed by @KaifAhmad1):
   - `OllamaProvider._init_client()` was assigning the raw `ollama` module to `self.client` instead of instantiating `ollama.Client(host=self.base_url)`, causing all requests to silently hit `localhost:11434` regardless of the `base_url` passed by the user
   - Fixed by replacing `self.client = ollama` with `self.client = ollama.Client(host=self.base_url)` — remote Ollama servers (e.g. `http://192.168.1.3:11434`) are now reachable
